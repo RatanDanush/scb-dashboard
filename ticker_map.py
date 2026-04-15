@@ -12,7 +12,38 @@ NSE tickers use the .NS suffix on Yahoo Finance (added automatically in fetchers
 
 TICKER_MAP = {
 
-    # ── TIER 1 — Pitch Immediately ─────────────────────────────────────────
+    # ── Previously missing listed companies ───────────────────────────────
+    # High exposure — $800M–$1.2B
+    "Bharti Airtel":                        "BHARTIARTL",
+    "Vodafone Idea Ltd":                    "IDEA",
+    "Hitachi Energy India":                 "POWERINDIA",
+    "GSK India":                            "GLAXO",
+    "GlaxoSmithKline Consumer":             "GLAXO",
+
+    # $400M–$800M
+    "Blue Dart Express":                    "BLUEDART",
+    "GE Power India":                       "GEPIL",
+    "GE T&D India":                         "GETD",
+    "VE Commercial Vehicles":               "VECV",
+    "Heidelberg Materials India":           "HEIDELBERG",
+
+    # $280M–$450M
+    "Otis Elevator Company India":          "OTIS",
+    "Clariant Chemicals India":             "CLNINDIA",
+    "Ingersoll-Rand India":                 "INGERRAND",
+    "Merck Life Science":                   "MERCK",
+    "Merck India":                          "MERCK",
+
+    # $75M–$180M
+    "DIC India Ltd":                        "DICINDIA",
+    "Wartsila India":                       "WRTSL",
+    "Alstom India Ltd":                     "ALSTOMIND",
+    "Sharp India Ltd":                      "SHARPIN",
+    "Lotte India Corporation":              "LOTTEIND",
+    "Asahi India Glass":                    "ASAHIINDIA",
+    "Sembcorp Energy India":                "SEIL",
+    "Gland Pharma":                         "GLANDPHARMA",
+    "ICRA Ltd":                             "ICRA",
     "Maruti Suzuki India Ltd":              "MARUTI",
     "Hindustan Unilever Ltd":               "HINDUNILVR",
     "Nestle India Ltd":                     "NESTLEIND",
