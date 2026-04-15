@@ -2,7 +2,7 @@ streamlit
 feedparser
 requests
 yfinance
-finnhub-python
+groq
 python-dotenv
 pandas
 openpyxl

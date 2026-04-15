@@ -15,6 +15,7 @@ from streamlit_autorefresh import st_autorefresh
 
 from client_registry import load_registry
 from corporate_fetcher import fetch_all_corporate_actions, LOOKBACK_DAYS, LOOKAHEAD_DAYS
+from groq_summarizer import generate_daily_briefing, make_snapshot, GROQ_API_KEY
 
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -208,6 +209,52 @@ for a in raw_actions:
 
 actions = [a for a in raw_actions if a["_score"] >= MINIMUM_SCORE]
 actions.sort(key=lambda x: x["_score"], reverse=True)
+
+# ─── Daily briefing (Groq) ───────────────────────────────────────────────────
+
+snapshot = make_snapshot(actions)
+
+if GROQ_API_KEY and snapshot:
+    st.markdown("""
+    <div style="background:#0a1628;border:1px solid #1e3a5f;border-radius:10px;
+                padding:16px 20px;margin-bottom:4px;">
+      <div style="font-size:11px;font-weight:600;color:#64b5f6;
+                  letter-spacing:0.06em;margin-bottom:10px;">
+        ◆&nbsp; DAILY FX DESK BRIEFING — AI SUMMARY
+      </div>
+    """, unsafe_allow_html=True)
+
+    with st.spinner("Generating briefing..."):
+        briefing = generate_daily_briefing(snapshot)
+
+    if briefing:
+        import re as _re
+        for line in briefing.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            line = _re.sub(r'\*\*(.+?)\*\*',
+                           r'<strong style="color:#e0e0e0;">\1</strong>', line)
+            if line.startswith(("•", "-", "*")):
+                st.markdown(
+                    f'<div style="font-size:13px;color:#b0bec5;line-height:1.75;'
+                    f'padding:2px 0 2px 4px;">{line}</div>',
+                    unsafe_allow_html=True)
+            else:
+                st.markdown(
+                    f'<div style="font-size:11px;color:#546e7a;padding:1px 0;">{line}</div>',
+                    unsafe_allow_html=True)
+
+    st.markdown(
+        f'<div style="font-size:10px;color:#37474f;margin-top:10px;">'
+        f'Groq / Llama 3 &nbsp;·&nbsp; {len(snapshot)} signals scored 50+ &nbsp;·&nbsp; '
+        f'Cached 30 min</div></div>',
+        unsafe_allow_html=True)
+
+elif not GROQ_API_KEY:
+    st.info("💡 Add GROQ_API_KEY to your .env to enable the AI daily briefing.")
+
+st.divider()
 
 # ─── Filters ─────────────────────────────────────────────────────────────────
 fc1, fc2, fc3 = st.columns([2, 2, 2])
