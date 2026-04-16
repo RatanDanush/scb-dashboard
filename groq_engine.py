@@ -85,14 +85,14 @@ Search for recent corporate actions by the given company.
 Focus ONLY on:
 - Acquisitions, mergers, stake sales, open offers
 - Capital raises, FDI, equity infusions, rights issues  
-- Dividends (especially large or special ones)
+- Dividends by Indian subsidiary ONLY (list all those only within 3 months)
 - IPOs, delistings, major restructuring
 - Joint ventures, strategic partnerships with financial implications
 - Significant capex announcements (new plants, expansions)
 
 For each finding return a JSON array:
 [{
-  "date": "YYYY-MM or YYYY-MM-DD",
+  "date": "MM-YYYY or DD-MM-YYYY",
   "action_type": "M&A|FDI|Dividend|Strategic|IPO|Buyback|Other",
   "headline": "clean one-line description",
   "fx_implication": "one sentence on FX/financial implication for Standard Chartered",
