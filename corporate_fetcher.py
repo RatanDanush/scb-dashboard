@@ -348,43 +348,124 @@ def fetch_finnhub(tickers: list) -> list:
 def fetch_all_corporate_actions(registry: dict) -> list:
     from client_registry import match_by_name
 
-    all_tickers   = list(registry["by_ticker"].keys())
-    tier1_tickers = [r["ticker"] for r in registry["tier1"] if r["ticker"]]
+    all_tickers = list(registry["by_ticker"].keys())
 
     print(f"\n{'='*60}")
     print(f"Fetching | window {_fmt(_from_dt())} → {_fmt(_to_dt())}")
-    print(f"Tickers: {len(all_tickers)} total | {len(tier1_tickers)} Tier 1")
+    print(f"Tickers: {len(all_tickers)} total")
     print(f"{'='*60}")
 
+    # ── Structured sources ────────────────────────────────────────────────────
     raw  = fetch_nse(set(all_tickers))
     raw += fetch_yfinance(all_tickers)
     raw += fetch_fmp(all_tickers)
-    raw += fetch_india_news(registry)   # replaces Finnhub
+    raw += fetch_india_news(registry)
 
-    print(f"\nRaw items: {len(raw)}")
+    # ── Active Google News search ─────────────────────────────────────────────
+    try:
+        from active_searcher import fetch_active_search, get_search_keys
+        t1, t2, snap = get_search_keys(registry)
+        active = fetch_active_search(t1, t2, snap)
+        raw += active
+        print(f"  Active search: {len(active)} items")
+    except Exception as ex:
+        print(f"  Active search error: {ex}")
 
-    # Enrich + deduplicate
+    # ── Groq web search cache (batch results) ─────────────────────────────────
+    try:
+        from batch_manager import load_cache, get_all_cached_events
+        cache        = load_cache()
+        cached_items = get_all_cached_events(registry, cache)
+        raw += cached_items
+    except Exception as ex:
+        print(f"  Batch cache error: {ex}")
+
+    print(f"\nRaw items before classify: {len(raw)}")
+
+    # ── Groq classifier ───────────────────────────────────────────────────────
+    # Only classify items that came from news sources (not NSE/yfinance structured data)
+    news_sources = {"Google News", "NSE — Announcements", "NSE — Corp Announcements",
+                    "yfinance"}  # yfinance already classified structurally
+    to_classify  = [(i, a) for i, a in enumerate(raw)
+                    if any(ns in a.get("source","") for ns in
+                           ["Google News","News —","Groq web"])
+                    and a.get("action_type") in ("Other","Strategic")]
+
+    if to_classify:
+        try:
+            from groq_engine import batch_classify, GROQ_API_KEY
+            if GROQ_API_KEY:
+                print(f"  Groq classifying {len(to_classify)} news items...")
+                headlines_tuple = tuple(
+                    (a["headline"], a.get("raw_detail","")[:100])
+                    for _, a in to_classify
+                )
+                classifications = batch_classify(headlines_tuple)
+                for (idx, action), clf in zip(to_classify, classifications):
+                    if clf.get("confidence") in ("high","medium"):
+                        raw[idx]["action_type"]    = clf.get("action_type", action["action_type"])
+                        raw[idx]["foreign_entity"] = clf.get("foreign_entity") or action.get("foreign_entity")
+                        if clf.get("deal_value_usd_m"):
+                            raw[idx]["amount"]   = clf["deal_value_usd_m"]
+                            raw[idx]["currency"] = "USD"
+                        raw[idx]["_groq_confidence"] = clf.get("confidence","medium")
+                        raw[idx]["_groq_significant"] = clf.get("is_significant", True)
+                    elif clf.get("confidence") == "low":
+                        raw[idx]["_groq_confidence"] = "low"
+                        raw[idx]["_groq_significant"] = clf.get("is_significant", False)
+        except Exception as ex:
+            print(f"  Groq classifier error: {ex}")
+
+    # ── Noise filter for active search items ──────────────────────────────────
+    try:
+        from groq_engine import is_noise, GROQ_API_KEY
+        if GROQ_API_KEY:
+            filtered_raw = []
+            noise_count  = 0
+            for a in raw:
+                if a.get("source") == "Google News" and a.get("_groq_confidence") == "low":
+                    client = a.get("_pre_matched") or {}
+                    if is_noise(a["headline"],
+                                client.get("client_group",""),
+                                client.get("indian_subsidiary","")):
+                        noise_count += 1
+                        continue
+                filtered_raw.append(a)
+            if noise_count:
+                print(f"  Noise filter removed {noise_count} low-confidence items")
+            raw = filtered_raw
+    except Exception as ex:
+        print(f"  Noise filter error: {ex}")
+
+    # ── Enrich + deduplicate ──────────────────────────────────────────────────
     seen, enriched = set(), []
     for a in raw:
         key = a["headline"][:70].lower().strip()
-        if key in seen: continue
+        if key in seen:
+            continue
         seen.add(key)
 
-        client = None
-        if a.get("_pre_matched"):
-            client = a.pop("_pre_matched")
-        elif a["ticker"] and a["ticker"] in registry["by_ticker"]:
-            client = registry["by_ticker"][a["ticker"]]
-        if not client and a["company_name"]:
-            client = match_by_name(a["company_name"] + " " + a["headline"], registry)
+        if "client" not in a:
+            client = a.pop("_pre_matched", None)
+            if not client and a.get("ticker") and a["ticker"] in registry["by_ticker"]:
+                client = registry["by_ticker"][a["ticker"]]
+            if not client and a.get("company_name"):
+                client = match_by_name(
+                    a["company_name"] + " " + a["headline"], registry)
+            a["client"]        = client
+            a["is_scb_client"] = client is not None
+        elif "_pre_matched" in a:
+            if not a.get("client"):
+                a["client"]        = a.pop("_pre_matched")
+                a["is_scb_client"] = a["client"] is not None
+            else:
+                a.pop("_pre_matched", None)
 
-        a["client"]        = client
-        a["is_scb_client"] = client is not None
         enriched.append(a)
 
     enriched.sort(key=lambda x: x["date"], reverse=True)
 
     scb = sum(1 for a in enriched if a["is_scb_client"])
-    print(f"After dedup: {len(enriched)} unique | {scb} matched to SCB clients")
+    print(f"After dedup: {len(enriched)} unique | {scb} SCB clients")
     print(f"{'='*60}\n")
     return enriched
