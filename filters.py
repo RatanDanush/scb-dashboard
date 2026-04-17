@@ -1,0 +1,118 @@
+"""
+filters.py
+----------
+Centralised keyword filters shared across corporate_fetcher.py
+and client_registry.py.
+
+Keeps filter logic in one place so updates propagate everywhere.
+"""
+
+# ─── Market commentary / equity noise ────────────────────────────────────────
+# Headlines matching these are NOT corporate actions
+
+MARKET_COMMENTARY_PHRASES = [
+    # Share price updates
+    "share price live", "stock price live", "live update", "live updates",
+    "price performance", "performance snapshot", "market behavior",
+    "share price today", "stock price today", "trading session",
+    # Analyst ratings
+    "rated buy", "rated sell", "rated hold", "rates buy", "rates sell",
+    "price target", "initiates coverage", "upgrades to", "downgrades to",
+    "outperform", "underperform", "neutral rating", "buy rating",
+    "sell rating", "hold rating", "target price",
+    # Post-IPO stock performance
+    "trades below issue price", "trades above issue price",
+    "below ipo price", "above ipo price", "ipo performance",
+    "how india's biggest ipos", "biggest ipos performing",
+    "stock falls", "stock rises", "shares fall", "shares rise",
+    "shares tumble", "shares surge", "shares drop",
+    # General market commentary
+    "wall street gains", "wall street falls", "market roundup",
+    "weekly wrap", "market wrap", "earnings beat", "earnings miss",
+    "revenue miss", "quarterly results", "q1 results", "q2 results",
+    "q3 results", "q4 results", "annual results",
+    # Technical analysis
+    "support level", "resistance level", "rsi", "moving average",
+    "52-week high", "52-week low", "market cap",
+]
+
+# ─── Aggregator / list articles ───────────────────────────────────────────────
+AGGREGATOR_PHRASES = [
+    "list of ", "top acquisitions", "acquisitions by ",
+    "tracxn", "crunchbase", "cb insights",
+    "deal tracker", "m&a tracker", "acquisition tracker",
+    "funding rounds", "latest funding",
+]
+
+# ─── Secondary reference patterns ────────────────────────────────────────────
+# Article is primarily about another company — client is only mentioned
+SECONDARY_REFERENCE_TEMPLATES = [
+    "ceo joins", "cfo joins", "executive joins", "director joins",
+    "adds {name} ceo", "hires {name}", "appoints {name} ceo",
+    "ex-{name}", "former {name} ceo", "former {name} executive",
+    "{name} ceo joins", "{name} executive joins",
+    "{name} board member joins", "board of {name}",
+]
+
+# ─── Commonly confused company pairs ─────────────────────────────────────────
+# Never cross-match these even if name fragments overlap
+NEVER_MATCH = {
+    "basf":           ["bayer", "bayercrop", "bayer cropscience"],
+    "bayer":          ["basf"],
+    "abbvie":         ["abbott", "abbotindia"],
+    "abbott":         ["abbvie"],
+    "siemens energy": ["siemens"],
+    "siemens":        ["siemens energy"],
+    "linde":          ["lindeindia"],
+    "pfizer":         ["piramal"],
+    "glaxo":          ["haleon"],
+    "shell":          [],
+    "unilever":       [],
+    "novartis":       [],
+}
+
+# ─── Words stripped from names before matching ───────────────────────────────
+NAME_STOP_WORDS = {
+    "ltd", "pvt", "limited", "india", "private", "of", "the", "and",
+    "group", "corp", "corporation", "holdings", "plc", "ag", "sa",
+    "bv", "inc", "llc", "gmbh", "nv",
+}
+
+# ─── Action types worth triggering Groq web search ───────────────────────────
+# If RSS finds these types for a client, escalate to Groq web search
+WEB_SEARCH_TRIGGER_TYPES = {"M&A", "FDI", "Strategic", "IPO", "Buyback", "Restructuring"}
+
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
+def is_market_commentary(headline: str) -> bool:
+    h = headline.lower()
+    if any(p in h for p in MARKET_COMMENTARY_PHRASES):
+        return True
+    if any(p in h for p in AGGREGATOR_PHRASES):
+        return True
+    return False
+
+def is_secondary_reference(headline: str, client_name: str) -> bool:
+    """True if client appears as secondary reference in the headline."""
+    h    = headline.lower()
+    name = client_name.lower()
+    # Strip generic words for cleaner matching
+    for w in ["group", "corporation", "holdings", "plc", "ag", "sa", "inc"]:
+        name = name.replace(w, "").strip()
+    if not name or len(name) < 4:
+        return False
+    patterns = [
+        f"adds {name} ceo", f"hires {name}", f"appoints {name}",
+        f"{name} ceo joins", f"{name} executive joins",
+        f"former {name}", f"ex-{name}",
+        f"{name} board member", f"board of ",
+    ]
+    return any(p in h for p in patterns)
+
+def pre_filter(headline: str) -> bool:
+    """
+    Fast keyword pre-filter before sending to Groq.
+    Returns True if headline should be KEPT (not filtered).
+    Returns False if headline is obvious noise.
+    """
+    return not is_market_commentary(headline)

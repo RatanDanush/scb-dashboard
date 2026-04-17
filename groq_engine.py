@@ -19,6 +19,9 @@ from dotenv import load_dotenv
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
+MODEL_FAST  = "llama-3.1-8b-instant"       # classification, noise filter
+MODEL_SMART = "llama-3.3-70b-versatile"    # web search, FX, briefing, deep dive
+
 
 # ─── Prompts ─────────────────────────────────────────────────────────────────
 
@@ -199,9 +202,23 @@ def _client():
     from groq import Groq
     return Groq(api_key=GROQ_API_KEY)
 
-def _call(system: str, user: str, model="llama-3.3-70b-versatile",
-          max_tokens=1200, temperature=0.1) -> str:
-    c = _client()
+def _call(system: str, user: str,
+          model=MODEL_SMART,
+          max_tokens=1200,
+          temperature=0.1,
+          budget_function: str = "buffer") -> str:
+    """Single Groq call — tracks token usage, respects budget."""
+    from token_tracker import can_afford, record_usage, remaining
+
+    est_tokens = max_tokens + len(system)//4 + len(user)//4
+    if not can_afford(budget_function, est_tokens):
+        rem = remaining(budget_function)
+        raise ValueError(
+            f"Token budget exhausted for '{budget_function}' "
+            f"(remaining: {rem} tokens). Resets at 5:30am IST."
+        )
+
+    c    = _client()
     resp = c.chat.completions.create(
         model=model,
         messages=[
@@ -211,6 +228,11 @@ def _call(system: str, user: str, model="llama-3.3-70b-versatile",
         temperature=temperature,
         max_tokens=max_tokens,
     )
+    # Record actual usage
+    actual = getattr(resp, "usage", None)
+    used   = actual.total_tokens if actual else est_tokens
+    record_usage(budget_function, used)
+
     return resp.choices[0].message.content.strip()
 
 def _parse_json(text: str):
@@ -247,7 +269,10 @@ def batch_classify(headlines_tuple: tuple) -> list:
             f"{numbered}"
         )
         try:
-            raw  = _call(CLASSIFIER_SYSTEM, user_msg, max_tokens=1000)
+            raw  = _call(CLASSIFIER_SYSTEM, user_msg,
+                         model=MODEL_FAST,
+                         max_tokens=800,
+                         budget_function="classify")
             data = _parse_json(raw)
             if isinstance(data, list) and len(data) == len(chunk):
                 results.extend(data)
@@ -309,7 +334,9 @@ def fx_implication(headline: str, action_type: str,
             f"Headline: {headline}\n\n"
             f"Write the FX implication sentence."
         )
-        result = _call(FX_IMPLICATION_SYSTEM, user_msg, max_tokens=80, temperature=0.2)
+        result = _call(FX_IMPLICATION_SYSTEM, user_msg,
+                       max_tokens=80, temperature=0.2,
+                       budget_function="fx_implication")
         return result.strip('"').strip("'").strip()
     except Exception as ex:
         print(f"  FX implication error: {ex}")
@@ -327,7 +354,9 @@ def is_noise(headline: str, client_group: str, subsidiary: str) -> bool:
             f"Client: {subsidiary} (parent: {client_group})\n"
             f"Headline: {headline}\n\nIs this relevant?"
         )
-        raw  = _call(NOISE_FILTER_SYSTEM, user_msg, max_tokens=60)
+        raw  = _call(NOISE_FILTER_SYSTEM, user_msg,
+                     model=MODEL_FAST, max_tokens=60,
+                     budget_function="classify")
         data = _parse_json(raw)
         return not data.get("relevant", True)
     except Exception:
@@ -353,6 +382,18 @@ def web_search_client(rec: dict) -> list:
     )
 
     try:
+        from token_tracker import can_afford, record_usage, client_already_searched
+        client_key = f"{grp}|{sub}"
+
+        # Skip if already searched today
+        if client_already_searched(client_key):
+            return []
+
+        # Check web search budget
+        if not can_afford("web_search", 1200):
+            print(f"  Web search budget exhausted — skipping {sub[:30]}")
+            return []
+
         c = _client()
         resp = c.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -381,6 +422,12 @@ def web_search_client(rec: dict) -> list:
         events = _parse_json(content)
         if not isinstance(events, list):
             return []
+
+        # Record actual usage
+        actual = getattr(resp, "usage", None)
+        used   = actual.total_tokens if actual else 1200
+        from token_tracker import record_usage
+        record_usage("web_search", used, client_key)
 
         results = []
         for ev in events:
@@ -431,7 +478,9 @@ def daily_briefing(action_snapshot: tuple) -> str:
             + "\n".join(lines)
             + "\n\nWrite the daily FX desk briefing."
         )
-        return _call(BRIEFING_SYSTEM, user_msg, max_tokens=500, temperature=0.2)
+        return _call(BRIEFING_SYSTEM, user_msg,
+                     max_tokens=500, temperature=0.2,
+                     budget_function="briefing")
     except Exception as ex:
         return f"_Briefing unavailable: {ex}_"
 

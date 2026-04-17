@@ -345,23 +345,29 @@ def fetch_finnhub(tickers: list) -> list:
         print("  Finnhub: has key but skipped — poor Indian NSE coverage; using Indian news RSS")
     return []
 
-def fetch_all_corporate_actions(registry: dict) -> list:
+
+def fetch_all_corporate_actions(registry: dict) -> tuple:
+    """
+    Returns (actions_list, signal_clients_set)
+    signal_clients_set: client keys where RSS/GNews found M&A/FDI/Strategic/IPO
+    for batch_manager to prioritise Groq web search.
+    """
     from client_registry import match_by_name
+    from filters import pre_filter, WEB_SEARCH_TRIGGER_TYPES
 
     all_tickers = list(registry["by_ticker"].keys())
-
     print(f"\n{'='*60}")
     print(f"Fetching | window {_fmt(_from_dt())} → {_fmt(_to_dt())}")
     print(f"Tickers: {len(all_tickers)} total")
     print(f"{'='*60}")
 
-    # ── Structured sources ────────────────────────────────────────────────────
+    # Structured sources
     raw  = fetch_nse(set(all_tickers))
     raw += fetch_yfinance(all_tickers)
     raw += fetch_fmp(all_tickers)
     raw += fetch_india_news(registry)
 
-    # ── Active Google News search ─────────────────────────────────────────────
+    # Active Google News search
     try:
         from active_searcher import fetch_active_search, get_search_keys
         t1, t2, snap = get_search_keys(registry)
@@ -371,7 +377,7 @@ def fetch_all_corporate_actions(registry: dict) -> list:
     except Exception as ex:
         print(f"  Active search error: {ex}")
 
-    # ── Groq web search cache (batch results) ─────────────────────────────────
+    # Batch cache (Groq web search results)
     try:
         from batch_manager import load_cache, get_all_cached_events
         cache        = load_cache()
@@ -380,19 +386,21 @@ def fetch_all_corporate_actions(registry: dict) -> list:
     except Exception as ex:
         print(f"  Batch cache error: {ex}")
 
-    print(f"\nRaw items before classify: {len(raw)}")
+    # Step 2: Keyword pre-filter (free, zero tokens)
+    pre_len = len(raw)
+    raw     = [a for a in raw if pre_filter(a.get("headline",""))]
+    print(f"  Pre-filter removed {pre_len - len(raw)} noise items")
 
-    # ── Groq classifier (all news items) ─────────────────────────────────────
-    # Classify ALL news items — apply INR filter, India-India, dividend filter
+    # Step 3: Groq classifier
     to_classify = [(i, a) for i, a in enumerate(raw)
                    if any(s in a.get("source","") for s in
                           ["Google News","News —","Groq web","Moneycontrol",
                            "Economic","Business Standard","Mint"])]
-
     if to_classify:
         try:
             from groq_engine import batch_classify, GROQ_API_KEY
-            if GROQ_API_KEY:
+            from token_tracker import can_afford
+            if GROQ_API_KEY and can_afford("classify", 500):
                 print(f"  Groq classifying {len(to_classify)} news items...")
                 hl_tuple = tuple(
                     (a["headline"], a.get("raw_detail","")[:120])
@@ -407,100 +415,67 @@ def fetch_all_corporate_actions(registry: dict) -> list:
                     raw[idx]["_indian_sub_div"]     = clf.get("is_indian_subsidiary_dividend", True)
                     raw[idx]["_is_primary_subject"] = clf.get("is_primary_subject", True)
                     raw[idx]["_sebi_open_offer"]    = clf.get("sebi_open_offer_trigger", False)
-                    # Extract event_date if Groq found it
                     ev_date = clf.get("event_date")
                     if ev_date:
                         raw[idx]["_event_date"] = str(ev_date)[:10]
                     if clf.get("confidence") in ("high","medium"):
                         raw[idx]["action_type"] = clf.get("action_type", action["action_type"])
-                        raw[idx]["foreign_entity"] = (clf.get("foreign_entity")
-                                                      or action.get("foreign_entity"))
+                        raw[idx]["foreign_entity"] = (clf.get("foreign_entity") or action.get("foreign_entity"))
                         if clf.get("deal_value_usd_m"):
                             raw[idx]["amount"]   = clf["deal_value_usd_m"]
                             raw[idx]["currency"] = "USD"
+            else:
+                print("  Groq classify: budget insufficient, using keyword fallback")
         except Exception as ex:
             print(f"  Groq classifier error: {ex}")
 
-    # ── Apply filters ─────────────────────────────────────────────────────────
-    pre_filter = len(raw)
+    # Step 4: Apply filters
+    pre_count    = len(raw)
     filtered_raw = []
     for a in raw:
-        source = a.get("source","")
-        atype  = a.get("action_type","Other")
-        is_news = any(s in source for s in ["Google","News","Groq","Moneycontrol",
-                                            "Economic","Standard","Mint"])
-
-        # Filter 1: INR must be involved
-        if is_news and not a.get("_inr_involved", True):
-            continue
-
-        # Filter 2: Skip pure India-India deals
-        if is_news and a.get("_skip_india_india", False):
-            continue
-
-        # Filter 3: Dividends — only Indian subsidiary dividends
-        if atype == "Dividend" and is_news:
-            if not a.get("_indian_sub_div", True):
-                continue
-
-        # Filter 4: Client must be primary subject of article
-        if is_news and not a.get("_is_primary_subject", True):
-            continue
-
-        # Filter 5: SEBI open offer — always keep even if foreign-foreign
-        # (already handled by inr_involved=true in classifier)
-
-        # Filter 6: Low significance items (aggregators, market commentary)
-        if is_news and not a.get("_groq_significant", True):
-            continue
-
+        source  = a.get("source","")
+        atype   = a.get("action_type","Other")
+        is_news = any(s in source for s in ["Google News","News —","Groq web",
+                                             "Moneycontrol","Economic",
+                                             "Business Standard","Mint"])
+        if is_news and not a.get("_inr_involved", True):           continue
+        if is_news and a.get("_skip_india_india", False):          continue
+        if atype == "Dividend" and is_news and not a.get("_indian_sub_div", True): continue
+        if is_news and not a.get("_is_primary_subject", True):     continue
+        if is_news and not a.get("_groq_significant", True):       continue
         filtered_raw.append(a)
-
-    removed = pre_filter - len(filtered_raw)
-    if removed:
-        print(f"  Filters removed {removed} items (no INR / India-India / foreign div)")
+    print(f"  Filters removed {pre_count - len(filtered_raw)} items")
     raw = filtered_raw
 
-    # ── First-seen tracking (for NEW flag) ────────────────────────────────────
-    import datetime as _dt
+    # Step 5: First-seen tracking
     try:
-        first_seen_file = "first_seen_cache.json"
-        if os.path.exists(first_seen_file):
-            with open(first_seen_file) as f:
-                first_seen_cache = json.load(f)
-        else:
-            first_seen_cache = {}
-
-        today_str = _dt.date.today().isoformat()
-        updated   = False
+        fs_file  = "first_seen_cache.json"
+        fs_cache = json.load(open(fs_file)) if os.path.exists(fs_file) else {}
+        today    = datetime.date.today().isoformat()
+        updated  = False
         for a in raw:
             key = a["headline"][:80].lower().strip()
-            if key not in first_seen_cache:
-                first_seen_cache[key] = today_str
+            if key not in fs_cache:
+                fs_cache[key] = today
                 updated = True
-            a["_first_seen"] = first_seen_cache[key]
-
+            a["_first_seen"] = fs_cache[key]
         if updated:
-            with open(first_seen_file, "w") as f:
-                json.dump(first_seen_cache, f)
+            json.dump(fs_cache, open(fs_file,"w"))
     except Exception as ex:
-        print(f"  First-seen tracking error: {ex}")
+        print(f"  First-seen error: {ex}")
 
-    # ── Enrich + deduplicate ──────────────────────────────────────────────────
+    # Step 6: Enrich + deduplicate
     seen, enriched = set(), []
     for a in raw:
         key = a["headline"][:70].lower().strip()
-        if key in seen:
-            continue
+        if key in seen: continue
         seen.add(key)
-
         if "client" not in a:
             client = a.pop("_pre_matched", None)
             if not client and a.get("ticker") and a["ticker"] in registry["by_ticker"]:
                 client = registry["by_ticker"][a["ticker"]]
             if not client and a.get("company_name"):
-                client = match_by_name(
-                    a["company_name"] + " " + a["headline"], registry)
+                client = match_by_name(a["company_name"] + " " + a["headline"], registry)
             a["client"]        = client
             a["is_scb_client"] = client is not None
         elif "_pre_matched" in a:
@@ -509,12 +484,20 @@ def fetch_all_corporate_actions(registry: dict) -> list:
                 a["is_scb_client"] = a["client"] is not None
             else:
                 a.pop("_pre_matched", None)
-
         enriched.append(a)
 
     enriched.sort(key=lambda x: x["date"], reverse=True)
 
+    # Extract signal clients for batch priority
+    signal_clients = set()
+    for a in enriched:
+        if a.get("action_type") in WEB_SEARCH_TRIGGER_TYPES and a.get("client"):
+            c   = a["client"]
+            key = f"{c.get('client_group','')}|{c.get('indian_subsidiary','')}"
+            signal_clients.add(key)
+
     scb = sum(1 for a in enriched if a["is_scb_client"])
     print(f"After dedup: {len(enriched)} unique | {scb} SCB clients")
+    print(f"Signal clients: {len(signal_clients)}")
     print(f"{'='*60}\n")
-    return enriched
+    return enriched, signal_clients

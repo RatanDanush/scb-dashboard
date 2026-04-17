@@ -23,6 +23,7 @@ from corporate_fetcher import fetch_all_corporate_actions, LOOKBACK_DAYS, LOOKAH
 from groq_engine import fx_implication, daily_briefing, make_snapshot, GROQ_API_KEY
 from batch_manager import run_next_batch, get_progress, load_cache
 from deep_dive import run_deep_dive
+from token_tracker import get_status as get_token_status
 
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -507,7 +508,7 @@ tab_live, tab_dive = st.tabs(["📡  Live Monitor", "🔍  Client Deep Dive"])
 # ═══════════════════════════════════════════════════════════════════════════
 with tab_live:
 
-    # Stats row
+    # Stats row + token tracker top-right
     c1,c2,c3,c4 = st.columns([2,2,2,2])
     with c1: st.metric("Monitored", len(registry["all"]))
     with c2: st.metric("Tickers",   len(registry["by_ticker"]))
@@ -516,15 +517,25 @@ with tab_live:
         f"{(dt.now()-timedelta(days=LOOKBACK_DAYS)).strftime('%d %b')} → "
         f"{(dt.now()+timedelta(days=LOOKAHEAD_DAYS)).strftime('%d %b')}")
     with c4:
-        cache_init = load_cache()
-        prog       = get_progress(registry, cache_init)
+        tok     = get_token_status()
+        used    = tok["total_used"]
+        budget  = tok["total_budget"]
+        pct     = tok["pct"]
+        ws_cl   = tok["web_search_clients"]
+        reset   = tok["ist_reset"]
+        at_lim  = tok["at_limit"]
+        bar_col = "#d32f2f" if at_lim else ("#BA7517" if pct > 70 else "#1D9E75")
         st.markdown(
-            f'<div style="text-align:right;padding-top:4px;">'
-            f'<div style="font-size:11px;color:#546e7a;">Web search</div>'
-            f'<div style="font-size:16px;font-weight:500;'
-            f'color:#{"1D9E75" if prog["pct"]>50 else "BA7517"};">'
-            f'{prog["fresh_24h"]}/{prog["total"]}</div>'
-            f'<div style="font-size:11px;color:#37474f;">Next batch in {prog["next_in_mins"]}m</div>'
+            f'<div style="text-align:right;padding-top:2px;">'
+            f'<div style="font-size:11px;color:#546e7a;">Groq tokens today</div>'
+            f'<div style="font-size:15px;font-weight:500;color:{bar_col};">'
+            f'{used:,} <span style="font-size:11px;color:#37474f;">/ {budget:,}</span></div>'
+            f'<div style="background:#1a1a1a;border-radius:3px;height:4px;margin:3px 0;">'
+            f'<div style="width:{min(pct,100)}%;height:4px;border-radius:3px;'
+            f'background:{bar_col};transition:width .4s;"></div></div>'
+            f'<div style="font-size:10px;color:#37474f;">'
+            f'{ws_cl} web searches · resets {reset}</div>'
+            f'{"<div style=\"font-size:10px;color:#d32f2f;font-weight:600;\">⚠ Token limit reached — web search paused</div>" if at_lim else ""}'
             f'</div>', unsafe_allow_html=True)
 
     ref_col, _ = st.columns([1,5])
@@ -537,7 +548,7 @@ with tab_live:
 
     # ── Fetch main feed FIRST (user sees dashboard immediately) ───────────────
     with st.spinner("Scanning sources..."):
-        raw = fetch_all_corporate_actions(registry)
+        raw, signal_clients = fetch_all_corporate_actions(registry)
 
     for a in raw:
         a["_score"]   = score_action(a)
@@ -791,7 +802,7 @@ with tab_live:
             'Running web search batch...</div>',
             unsafe_allow_html=True)
     try:
-        updated_cache = run_next_batch(registry)
+        updated_cache = run_next_batch(registry, signal_clients=signal_clients)
         new_prog      = get_progress(registry, updated_cache)
         batch_status.markdown(
             f'<div style="font-size:11px;color:#1b5e20;text-align:right;">'
