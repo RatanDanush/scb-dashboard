@@ -525,6 +525,7 @@ with tab_live:
         reset   = tok["ist_reset"]
         at_lim  = tok["at_limit"]
         bar_col = "#d32f2f" if at_lim else ("#BA7517" if pct > 70 else "#1D9E75")
+        limit_warn = '<div style="font-size:10px;color:#d32f2f;font-weight:600;">⚠ Token limit reached — web search paused</div>' if at_lim else ""
         st.markdown(
             f'<div style="text-align:right;padding-top:2px;">'
             f'<div style="font-size:11px;color:#546e7a;">Groq tokens today</div>'
@@ -535,7 +536,7 @@ with tab_live:
             f'background:{bar_col};transition:width .4s;"></div></div>'
             f'<div style="font-size:10px;color:#37474f;">'
             f'{ws_cl} web searches · resets {reset}</div>'
-            f'{"<div style=\"font-size:10px;color:#d32f2f;font-weight:600;\">⚠ Token limit reached — web search paused</div>" if at_lim else ""}'
+            f'{limit_warn}'
             f'</div>', unsafe_allow_html=True)
 
     ref_col, _ = st.columns([1,5])
