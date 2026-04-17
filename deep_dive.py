@@ -86,7 +86,7 @@ def _fetch_all_headlines(client_group: str, indian_subsidiary: str) -> list:
                          client_group, flags=re.IGNORECASE).strip()
 
     queries = [
-        f'"{sub_clean}" acquisition OR dividend by indian subsidiary OR investment OR merger',
+        f'"{sub_clean}" acquisition OR dividend by indian subsidiary OR investment OR merger, all involving cross border INR FX flows or opportunities for the same',
         f'"{sub_clean}" India deal OR stake OR capital',
         f'"{group_clean}" India acquisition OR investment OR subsidiary',
     ]
@@ -172,7 +172,7 @@ def _groq_extract(headlines: list, client_group: str,
         user_msg = (
             f"Company: {indian_subsidiary} (MNC parent: {client_group})\n\n"
             f"Headlines from the past 12 months:\n{hl_text}\n\n"
-            f"Extract all significant corporate actions(FDI, Strategic Investments, Dividends announced in last 2 months only if by Indian subsidiary, . Return JSON array only."
+            f"Extract all significant corporate actions(FDI & Strategic Investments involving cross border INR FX flows or opportunities for future INR FX Flows, Dividends announced in last 2 months only if by Indian subsidiary, . Return JSON array only."
         )
 
         resp = client.chat.completions.create(
