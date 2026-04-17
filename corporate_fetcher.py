@@ -400,11 +400,13 @@ def fetch_all_corporate_actions(registry: dict) -> list:
                 )
                 clfs = batch_classify(hl_tuple)
                 for (idx, action), clf in zip(to_classify, clfs):
-                    raw[idx]["_groq_confidence"]  = clf.get("confidence","medium")
-                    raw[idx]["_groq_significant"]  = clf.get("is_significant", True)
-                    raw[idx]["_inr_involved"]      = clf.get("inr_involved", True)
-                    raw[idx]["_skip_india_india"]  = clf.get("skip_india_india", False)
-                    raw[idx]["_indian_sub_div"]    = clf.get("is_indian_subsidiary_dividend", True)
+                    raw[idx]["_groq_confidence"]    = clf.get("confidence","medium")
+                    raw[idx]["_groq_significant"]   = clf.get("is_significant", True)
+                    raw[idx]["_inr_involved"]       = clf.get("inr_involved", True)
+                    raw[idx]["_skip_india_india"]   = clf.get("skip_india_india", False)
+                    raw[idx]["_indian_sub_div"]     = clf.get("is_indian_subsidiary_dividend", True)
+                    raw[idx]["_is_primary_subject"] = clf.get("is_primary_subject", True)
+                    raw[idx]["_sebi_open_offer"]    = clf.get("sebi_open_offer_trigger", False)
                     # Extract event_date if Groq found it
                     ev_date = clf.get("event_date")
                     if ev_date:
@@ -428,7 +430,7 @@ def fetch_all_corporate_actions(registry: dict) -> list:
         is_news = any(s in source for s in ["Google","News","Groq","Moneycontrol",
                                             "Economic","Standard","Mint"])
 
-        # Filter 1: INR must be involved (news items only — NSE/yfinance always INR)
+        # Filter 1: INR must be involved
         if is_news and not a.get("_inr_involved", True):
             continue
 
@@ -436,25 +438,21 @@ def fetch_all_corporate_actions(registry: dict) -> list:
         if is_news and a.get("_skip_india_india", False):
             continue
 
-        # Filter 3: Dividends — only Indian subsidiary dividends are relevant
-        # NSE RSS dividends are always from Indian companies — keep them all
-        # News dividends — only keep if Groq confirms it's an Indian subsidiary div
+        # Filter 3: Dividends — only Indian subsidiary dividends
         if atype == "Dividend" and is_news:
             if not a.get("_indian_sub_div", True):
                 continue
 
-        # Filter 4: Noise filter for low-confidence items
-        if is_news and a.get("_groq_confidence") == "low":
-            try:
-                from groq_engine import is_noise, GROQ_API_KEY
-                if GROQ_API_KEY:
-                    pm = a.get("_pre_matched") or {}
-                    if is_noise(a["headline"],
-                                pm.get("client_group",""),
-                                pm.get("indian_subsidiary","")):
-                        continue
-            except Exception:
-                pass
+        # Filter 4: Client must be primary subject of article
+        if is_news and not a.get("_is_primary_subject", True):
+            continue
+
+        # Filter 5: SEBI open offer — always keep even if foreign-foreign
+        # (already handled by inr_involved=true in classifier)
+
+        # Filter 6: Low significance items (aggregators, market commentary)
+        if is_news and not a.get("_groq_significant", True):
+            continue
 
         filtered_raw.append(a)
 

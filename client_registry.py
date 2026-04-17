@@ -24,6 +24,7 @@ Each client record looks like:
 }
 """
 
+import re
 import pandas as pd
 import streamlit as st
 from ticker_map import TICKER_MAP   # hand-curated NSE tickers
@@ -171,33 +172,131 @@ def load_registry() -> dict:
     }
 
 
+# Companies that are commonly confused — never cross-match these
+NEVER_MATCH = {
+    "basf":         ["bayer", "bayercrop", "bayer cropscience"],
+    "bayer":        ["basf"],
+    "abbvie":       ["abbott", "abbotindia"],
+    "abbott":       ["abbvie"],
+    "siemens energy": ["siemens"],
+    "siemens":      ["siemens energy"],
+    "linde":        ["lindeindia"],      # global Linde vs Linde India
+    "novartis":     [],                  # fine as-is
+    "pfizer":       ["piramal"],
+    "glaxo":        ["glaxosmithkline consumer", "haleon"],
+    "shell":        ["shell india"],
+    "unilever":     [],
+}
+
+# Keywords that indicate article is market commentary, not a corporate action
+MARKET_COMMENTARY_PHRASES = [
+    "share price live", "stock price live", "live update", "live updates",
+    "price performance", "performance snapshot", "market behavior",
+    "rated buy", "rated sell", "rated hold", "rates buy", "rates sell",
+    "price target", "initiates coverage", "upgrades to", "downgrades to",
+    "outperform", "underperform", "neutral rating",
+    "trades below issue price", "stock falls", "stock rises",
+    "trades below ipo", "below ipo price", "ipo performance",
+    "how india's biggest ipos", "biggest ipos performing",
+]
+
+def _is_market_commentary(headline: str) -> bool:
+    h = headline.lower()
+    return any(p in h for p in MARKET_COMMENTARY_PHRASES)
+
+def _is_secondary_reference(headline: str, client_name: str) -> bool:
+    """
+    Returns True if the client appears as a secondary reference
+    (e.g. 'Anthropic adds Novartis CEO to board' → Novartis is secondary)
+    """
+    h    = headline.lower()
+    name = client_name.lower().replace(" group","").replace(" ltd","").strip()
+    if not name or len(name) < 4:
+        return False
+
+    # Patterns where client is clearly secondary
+    secondary_patterns = [
+        f"adds {name}",
+        f"hires {name}",
+        f"appoints {name}",
+        f"{name} ceo joins",
+        f"{name} executive joins",
+        f"{name} cfo joins",
+        f"ex-{name}",
+        f"former {name}",
+    ]
+    return any(p in h for p in secondary_patterns)
+
+
 def match_by_name(text: str, registry: dict) -> dict | None:
     """
-    Fuzzy-match a piece of text against all known subsidiary names.
-    Returns the best matching client record or None.
+    Fuzzy-match text against known subsidiary/group names.
+    Returns best matching client record or None.
+
+    Fixes:
+    - Minimum fragment length of 6 chars (was 4 — caught too many false positives)
+    - Never cross-match known confused pairs (BASF/Bayer, Abbott/AbbVie etc)
+    - Skip market commentary headlines entirely
+    - Skip secondary-reference patterns
     """
+    if _is_market_commentary(text):
+        return None
+
     text_lower = text.lower()
     best_match = None
     best_score = 0
 
-    for name, rec in registry["by_name"].items():
-        # Score = length of matching name (longer = more specific match)
-        name_words = name.replace("ltd", "").replace("pvt", "").replace(
-            "limited", "").replace("india", "").strip()
-        if len(name_words) < 4:
-            continue
-        if name_words in text_lower:
-            score = len(name_words)
-            if score > best_score:
-                best_score = score
-                best_match = rec
+    STOP = {"ltd","pvt","limited","india","private","of","the","and","group",
+            "corp","corporation","holdings","plc","ag","sa","bv","inc"}
 
-    # Also try matching on client group name
+    for name, rec in registry["by_name"].items():
+        # Clean the name to its core searchable parts
+        words     = [w for w in re.split(r'\W+', name.lower()) if w not in STOP]
+        core_name = " ".join(words).strip()
+        if len(core_name) < 6:
+            continue
+
+        if core_name not in text_lower:
+            continue
+
+        score = len(core_name)
+
+        # Check NEVER_MATCH exclusions
+        excluded = False
+        for k, excl_list in NEVER_MATCH.items():
+            if k in core_name:
+                for excl in excl_list:
+                    if excl in text_lower:
+                        excluded = True
+                        break
+            if excluded:
+                break
+        if excluded:
+            continue
+
+        # Check if client is secondary reference
+        grp = rec.get("client_group","")
+        if _is_secondary_reference(text, grp):
+            continue
+
+        if score > best_score:
+            best_score = score
+            best_match = rec
+
+    # Fallback: try matching on client group name
     if not best_match:
         for rec in registry["all"]:
-            group = rec["client_group"].lower().replace(" group", "").strip()
-            if len(group) > 4 and group in text_lower:
-                best_match = rec
-                break
+            grp   = rec.get("client_group","") or ""
+            words = [w for w in re.split(r'\W+', grp.lower()) if w not in STOP]
+            core  = " ".join(words).strip()
+            if len(core) < 6:
+                continue
+            if core not in text_lower:
+                continue
+            # Check secondary reference
+            if _is_secondary_reference(text, grp):
+                continue
+            best_match = rec
+            break
 
     return best_match

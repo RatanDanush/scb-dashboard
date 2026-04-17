@@ -149,7 +149,7 @@ def is_special_div(a):
             or amt >= 15)
 
 ACTION_SCORES = {
-    "Dividend_Special":30,"M&A":30,"FDI":25,"Dividend":15,
+    "Dividend_Special":30,"M&A":30,"FDI":28,"Dividend":15,
     "Buyback":20,"Strategic":10,"IPO":20,"Stock Split":5,"Other":3,
 }
 
@@ -158,24 +158,58 @@ def score_action(a):
     atype = a.get("action_type","Other")
     akey  = "Dividend_Special" if atype=="Dividend" and is_special_div(a) else atype
     total += ACTION_SCORES.get(akey, 3)
+
+    # Exposure
     exp = (a.get("client") or {}).get("net_nih_exposure") or 0
     if exp >= 1000:   total += 20
     elif exp >= 500:  total += 12
     elif exp >= 100:  total += 6
     elif exp > 0:     total += 2
+
+    # Non-client significant deal boost
     if not a.get("is_scb_client") and atype in ("M&A","FDI","IPO"):
         sig = a.get("_significance","")
         if sig == "High":   total += 15
         elif sig == "Medium": total += 8
+
+    # Boost: confirmed Indian subsidiary dividend (NSE RSS or yfinance)
+    # These are always genuine repatriation events
+    source = a.get("source","")
+    if atype in ("Dividend","Dividend_Special") and any(
+            s in source for s in ["NSE","yfinance"]):
+        total += 10
+
+    # Boost: SEBI open offer trigger
+    if a.get("_sebi_open_offer"):
+        total += 15
+
+    # Penalty: M&A from news source with no India keyword in headline
+    # Secondary safety net on top of Groq filter
+    if atype == "M&A" and "google" in source.lower():
+        headline_lower = a.get("headline","").lower()
+        if not any(w in headline_lower for w in
+                   ["india","indian","nse","bse","mumbai","delhi","bengaluru",
+                    "hyderabad","pune","chennai","open offer","sebi"]):
+            total -= 20
+
+    # Recency scoring
     try:
         delta = (datetime.date.today() -
                  datetime.date.fromisoformat(a.get("date","")[:10])).days
-        if delta <= 1:   total += 10
-        elif delta <= 3: total += 7
-        elif delta <= 7: total += 4
+        if delta <= 1:    total += 10
+        elif delta <= 3:  total += 7
+        elif delta <= 7:  total += 4
+        elif delta <= 30: total += 0
+        # Score decay for old events — dividends older than 90 days
+        # should not lead groups over recent events
+        if atype in ("Dividend","Dividend_Special","Stock Split") and delta > 90:
+            total -= 15
+        elif delta > 180:
+            total -= 10
     except Exception:
         pass
-    return total
+
+    return max(0, total)   # floor at 0
 
 def urgency(score):
     if score >= 70: return "critical"

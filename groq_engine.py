@@ -33,74 +33,115 @@ For each headline return a JSON object with:
   "inr_involved": true | false,
   "skip_india_india": true | false,
   "is_indian_subsidiary_dividend": true | false,
+  "is_primary_subject": true | false,
+  "sebi_open_offer_trigger": true | false,
   "foreign_entity": "counterparty name or null",
   "deal_value_usd_m": number or null,
   "is_significant": true | false,
   "event_date": "YYYY-MM-DD or YYYY-MM or null"
 }
 
-CRITICAL RULES — apply these strictly:
+═══ FILTER 1: INR INVOLVEMENT ═══
+inr_involved = true ONLY if the transaction creates a real cross-border INR flow:
+  ✅ Foreign MNC investing in / acquiring an Indian company
+  ✅ Indian subsidiary paying dividends to foreign parent (repatriation)
+  ✅ Foreign company acquiring Indian company (deal settled in INR)
+  ✅ Indian subsidiary funded via ECB or foreign parent capital
+  ✅ Indian conglomerate acquiring using foreign currency bonds
+  ✅ Upstream foreign merger that triggers SEBI open offer for listed Indian subsidiary
 
-inr_involved = true ONLY if the transaction creates a cross-border INR flow:
-  - Foreign MNC → Indian company (FDI, acquisition, funding) ✅
-  - Indian company → foreign parent (dividend repatriation, royalty) ✅
-  - Foreign company acquiring Indian company (deal settlement involves INR) ✅
-  - Indian subsidiary funded by foreign parent ECB ✅
-  - Indian conglomerate acquiring using foreign currency bonds ✅
-  - Any cross-border capital flow touching India ✅
-  - Purely domestic Indian deal with no foreign funding or cross-border element ❌
-  - Global deal that only mentions India in passing ❌
+  ❌ CRITICAL: Foreign parent acquires another foreign company → inr_involved = FALSE
+     Even if the acquirer has an Indian subsidiary, that does NOT create INR flow
+     Translation/accounting exposure is NOT a real FX flow
+  ❌ Foreign company acquires company in a non-India country → FALSE
+     (e.g. Akzo Nobel acquires Pakistan company → PKR not INR → FALSE)
+  ❌ Global divestiture where Indian subsidiary is not a named party → FALSE
+     (e.g. Nestlé sells global water brands → Nestlé India doesn't own water brands → FALSE)
+  ❌ Any deal where both acquirer and target are outside India → FALSE
 
+═══ FILTER 2: INDIA-INDIA SKIP ═══
 skip_india_india = true if:
-  - Both the acquirer AND target are Indian domestic entities
-  - No foreign parent, no ECB, no cross-border funding element
-  - Pure domestic M&A with no FX angle
-  EXCEPTION: keep (skip=false) if Indian company uses foreign currency bonds,
-  ECB proceeds, or foreign parent funding to make the acquisition
+  - Both acquirer AND target are Indian domestic entities
+  - No foreign funding, no ECB, no cross-border element
+  EXCEPTION — skip=false if:
+  - Indian company uses ECB or foreign currency bonds for the acquisition
+  - Foreign parent is funding the deal
+  - Any cross-border capital movement involved
 
+═══ FILTER 3: DIVIDEND FILTER ═══
 is_indian_subsidiary_dividend = true ONLY if:
-  - The dividend is declared BY an Indian company/subsidiary
-  - The dividend will flow TO a foreign parent (creates INR→foreign currency repatriation)
-  - NOT: a foreign parent declaring dividend to all shareholders
-  - NOT: a global dividend announcement that incidentally includes Indian operations
+  - Dividend declared BY an Indian listed company (will flow to foreign parent)
+  - Creates INR→foreign currency repatriation flow
+  NOT: foreign parent global dividend announcement
+  NOT: dividend mentioned in passing in a global earnings report
 
-event_date: extract the actual date the EVENT occurred (not when reported).
-  Look for phrases like "signed on", "announced on", "effective from", "declared on".
-  If only a month/year is clear, use YYYY-MM format.
+═══ FILTER 4: AGGREGATOR / LIST ARTICLES ═══
+is_significant = false AND inr_involved = false if:
+  - Article is a list of acquisitions (e.g. "List of 44 acquisitions by X")
+  - Source is Tracxn, Crunchbase, CB Insights listing deals
+  - Article is a database roundup, not a specific deal announcement
+
+═══ FILTER 5: MARKET COMMENTARY / EQUITY NEWS ═══
+is_significant = false AND action_type = "Other" if:
+  - Share price live updates, stock performance snapshots
+  - Analyst ratings: "rated buy", "rated sell", "price target", "initiates coverage"
+  - Broker upgrades/downgrades, outperform/underperform calls
+  - Post-IPO stock performance: "stock falls", "trades below issue price"
+  - General market roundups mentioning company incidentally
+  - "Share price live", "stock performance", "market cap update"
+
+═══ FILTER 6: CLIENT AS SECONDARY REFERENCE ═══
+is_primary_subject = false AND is_significant = false if:
+  - The headline is primarily about a DIFFERENT company
+  - The matched client appears only because an executive/person from client
+    joined another company's board, or is mentioned as a secondary reference
+  - Example: "Anthropic adds Novartis CEO to board" → primary subject = Anthropic,
+    NOT Novartis. Mark is_primary_subject = false for Novartis match.
+  - Example: "Wall Street gains; PepsiCo rises, Abbott falls 4%" → primary subject
+    is market commentary, not Abbott India
+
+═══ FILTER 7: SEBI OPEN OFFER TRIGGER ═══
+sebi_open_offer_trigger = true if:
+  - A foreign parent of a listed Indian company is being acquired by another entity
+  - This upstream change in control triggers mandatory SEBI open offer obligations
+  - Example: Akzo Nobel N.V. merging with Axalta → Akzo Nobel India faces open offer
+  - This IS INR-relevant (open offer settled in INR) → inr_involved = true
+
+═══ GENERAL RULES ═══
+event_date: extract actual event date from article text (not publish date)
+  Look for: "signed on", "announced on", "effective from", "declared on"
+confidence = "low" for any item that is:
+  - Older than 12 months
+  - About a company only tangentially related to the matched client
+  - Pure market commentary with no corporate action
 
 Return ONLY a valid JSON array of objects, one per headline. No other text."""
 
-FX_IMPLICATION_SYSTEM = """You are an FX salesperson at Standard Chartered Bank India.
-Write EXACTLY ONE sentence (max 35 words) on the cross-border FX opportunity.
-
-Be specific:
-- Name the exact currency pair (e.g. INR→EUR, USD→INR, JPY→INR)
-- Name the SC product (FX Forward, PrismFX, Cross-Currency Swap, NDF, FX Option)
-- Infer parent currency from company name/country (Siemens=EUR, Maruti/Suzuki=JPY,
-  HUL/Unilever=GBP, Nestle=CHF, ABB=CHF, Bosch=EUR, Hyundai=KRW, Samsung=KRW)
-
-Good examples:
-"Bosch dividend repatriation creates ₹→EUR flow for Bosch GmbH — FX Forward to lock conversion rate."
-"ABB India capital raise brings CHF→INR inflow from ABB Switzerland — PrismFX for conversion."
-"Siemens stake deal triggers EUR→INR FDI flow — Cross-Currency Swap to hedge translation exposure."
-
-Return ONLY the sentence. No quotes, no preamble."""
-
-NOISE_FILTER_SYSTEM = """You are a relevance filter for Standard Chartered Bank India FX desk.
-Given a headline and the client it relates to, answer: is this relevant?
+NOISE_FILTER_SYSTEM = """You are a strict relevance filter for Standard Chartered Bank India FX desk.
+Given a headline and the client it relates to, decide: is this genuinely relevant?
 
 Return JSON: {"relevant": true|false, "reason": "brief phrase"}
 
-NOT relevant:
-- Generic industry news mentioning company in passing
-- Product launches, awards, CSR, marketing campaigns
-- Operational news with no financial/capital markets angle
-- Clearly about a different company with similar name
+ALWAYS mark as NOT relevant:
+- Share price updates, live market feeds, stock performance snapshots
+- Analyst ratings, broker upgrades/downgrades, price targets
+- "Rated buy/sell/hold", "outperform/underperform", "initiates coverage"
+- Post-IPO stock performance ("trades below issue price", "stock falls/rises X%")
+- General market commentary mentioning company in passing
+- The article's PRIMARY subject is a different company (client only appears as
+  secondary reference — e.g. "Company X hires ex-ClientCo CEO")
+- List articles / aggregator roundups (Tracxn, Crunchbase deal lists)
+- Product launches, awards, CSR, marketing, operational news
+- Science/R&D news with no capital markets angle
+- Global deals where the Indian subsidiary is not a named party
 
-RELEVANT:
-- M&A, capital raises, stake changes, dividends, restructuring
-- Foreign parent involvement in India operations
-- Significant capex with cross-border funding
+MARK as RELEVANT:
+- M&A where Indian entity is acquirer or target
+- Capital raises, rights issues, FDI into Indian operations
+- Dividends declared by Indian subsidiary
+- SEBI open offer triggers from upstream ownership changes
+- Restructuring, demerger, delisting of Indian listed entity
+- Large capex with confirmed foreign funding component
 
 Return ONLY valid JSON."""
 
