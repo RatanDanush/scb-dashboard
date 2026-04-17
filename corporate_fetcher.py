@@ -11,7 +11,7 @@ Sources (in priority order):
   4. Finnhub  — needs free key, company news with action detection
 """
 
-import os, re, datetime, requests, feedparser
+import os, re, json, datetime, requests, feedparser
 import yfinance as yf
 from dotenv import load_dotenv
 
@@ -382,60 +382,111 @@ def fetch_all_corporate_actions(registry: dict) -> list:
 
     print(f"\nRaw items before classify: {len(raw)}")
 
-    # ── Groq classifier ───────────────────────────────────────────────────────
-    # Only classify items that came from news sources (not NSE/yfinance structured data)
-    news_sources = {"Google News", "NSE — Announcements", "NSE — Corp Announcements",
-                    "yfinance"}  # yfinance already classified structurally
-    to_classify  = [(i, a) for i, a in enumerate(raw)
-                    if any(ns in a.get("source","") for ns in
-                           ["Google News","News —","Groq web"])
-                    and a.get("action_type") in ("Other","Strategic")]
+    # ── Groq classifier (all news items) ─────────────────────────────────────
+    # Classify ALL news items — apply INR filter, India-India, dividend filter
+    to_classify = [(i, a) for i, a in enumerate(raw)
+                   if any(s in a.get("source","") for s in
+                          ["Google News","News —","Groq web","Moneycontrol",
+                           "Economic","Business Standard","Mint"])]
 
     if to_classify:
         try:
             from groq_engine import batch_classify, GROQ_API_KEY
             if GROQ_API_KEY:
                 print(f"  Groq classifying {len(to_classify)} news items...")
-                headlines_tuple = tuple(
-                    (a["headline"], a.get("raw_detail","")[:100])
+                hl_tuple = tuple(
+                    (a["headline"], a.get("raw_detail","")[:120])
                     for _, a in to_classify
                 )
-                classifications = batch_classify(headlines_tuple)
-                for (idx, action), clf in zip(to_classify, classifications):
+                clfs = batch_classify(hl_tuple)
+                for (idx, action), clf in zip(to_classify, clfs):
+                    raw[idx]["_groq_confidence"]  = clf.get("confidence","medium")
+                    raw[idx]["_groq_significant"]  = clf.get("is_significant", True)
+                    raw[idx]["_inr_involved"]      = clf.get("inr_involved", True)
+                    raw[idx]["_skip_india_india"]  = clf.get("skip_india_india", False)
+                    raw[idx]["_indian_sub_div"]    = clf.get("is_indian_subsidiary_dividend", True)
+                    # Extract event_date if Groq found it
+                    ev_date = clf.get("event_date")
+                    if ev_date:
+                        raw[idx]["_event_date"] = str(ev_date)[:10]
                     if clf.get("confidence") in ("high","medium"):
-                        raw[idx]["action_type"]    = clf.get("action_type", action["action_type"])
-                        raw[idx]["foreign_entity"] = clf.get("foreign_entity") or action.get("foreign_entity")
+                        raw[idx]["action_type"] = clf.get("action_type", action["action_type"])
+                        raw[idx]["foreign_entity"] = (clf.get("foreign_entity")
+                                                      or action.get("foreign_entity"))
                         if clf.get("deal_value_usd_m"):
                             raw[idx]["amount"]   = clf["deal_value_usd_m"]
                             raw[idx]["currency"] = "USD"
-                        raw[idx]["_groq_confidence"] = clf.get("confidence","medium")
-                        raw[idx]["_groq_significant"] = clf.get("is_significant", True)
-                    elif clf.get("confidence") == "low":
-                        raw[idx]["_groq_confidence"] = "low"
-                        raw[idx]["_groq_significant"] = clf.get("is_significant", False)
         except Exception as ex:
             print(f"  Groq classifier error: {ex}")
 
-    # ── Noise filter for active search items ──────────────────────────────────
-    try:
-        from groq_engine import is_noise, GROQ_API_KEY
-        if GROQ_API_KEY:
-            filtered_raw = []
-            noise_count  = 0
-            for a in raw:
-                if a.get("source") == "Google News" and a.get("_groq_confidence") == "low":
-                    client = a.get("_pre_matched") or {}
+    # ── Apply filters ─────────────────────────────────────────────────────────
+    pre_filter = len(raw)
+    filtered_raw = []
+    for a in raw:
+        source = a.get("source","")
+        atype  = a.get("action_type","Other")
+        is_news = any(s in source for s in ["Google","News","Groq","Moneycontrol",
+                                            "Economic","Standard","Mint"])
+
+        # Filter 1: INR must be involved (news items only — NSE/yfinance always INR)
+        if is_news and not a.get("_inr_involved", True):
+            continue
+
+        # Filter 2: Skip pure India-India deals
+        if is_news and a.get("_skip_india_india", False):
+            continue
+
+        # Filter 3: Dividends — only Indian subsidiary dividends are relevant
+        # NSE RSS dividends are always from Indian companies — keep them all
+        # News dividends — only keep if Groq confirms it's an Indian subsidiary div
+        if atype == "Dividend" and is_news:
+            if not a.get("_indian_sub_div", True):
+                continue
+
+        # Filter 4: Noise filter for low-confidence items
+        if is_news and a.get("_groq_confidence") == "low":
+            try:
+                from groq_engine import is_noise, GROQ_API_KEY
+                if GROQ_API_KEY:
+                    pm = a.get("_pre_matched") or {}
                     if is_noise(a["headline"],
-                                client.get("client_group",""),
-                                client.get("indian_subsidiary","")):
-                        noise_count += 1
+                                pm.get("client_group",""),
+                                pm.get("indian_subsidiary","")):
                         continue
-                filtered_raw.append(a)
-            if noise_count:
-                print(f"  Noise filter removed {noise_count} low-confidence items")
-            raw = filtered_raw
+            except Exception:
+                pass
+
+        filtered_raw.append(a)
+
+    removed = pre_filter - len(filtered_raw)
+    if removed:
+        print(f"  Filters removed {removed} items (no INR / India-India / foreign div)")
+    raw = filtered_raw
+
+    # ── First-seen tracking (for NEW flag) ────────────────────────────────────
+    import datetime as _dt
+    try:
+        first_seen_file = "first_seen_cache.json"
+        if os.path.exists(first_seen_file):
+            with open(first_seen_file) as f:
+                first_seen_cache = json.load(f)
+        else:
+            first_seen_cache = {}
+
+        today_str = _dt.date.today().isoformat()
+        updated   = False
+        for a in raw:
+            key = a["headline"][:80].lower().strip()
+            if key not in first_seen_cache:
+                first_seen_cache[key] = today_str
+                updated = True
+            a["_first_seen"] = first_seen_cache[key]
+
+        if updated:
+            with open(first_seen_file, "w") as f:
+                json.dump(first_seen_cache, f)
     except Exception as ex:
-        print(f"  Noise filter error: {ex}")
+        print(f"  First-seen tracking error: {ex}")
 
     # ── Enrich + deduplicate ──────────────────────────────────────────────────
     seen, enriched = set(), []

@@ -1,20 +1,26 @@
 """
-app.py — SCB Corporate Actions Intelligence  v4
+app.py — SCB Corporate Actions Intelligence  v5
 ------------------------------------------------
-Tabs: Live Monitor | Client Deep Dive
-New: FX implication per card, non-client box, batch progress top-right
+Changes:
+  - Grouped by MNC parent (highest score leads, others collapse)
+  - NEW flag (first_seen within 7 days AND event_date within 30 days)
+  - Bigger dates, better readability
+  - Google News fallback link for all items
+  - Batch runs AFTER main feed loads (non-blocking)
+  - INR filter applied upstream in fetcher
 """
 
 import streamlit as st
 import pandas as pd
 import re
 import datetime
+import urllib.parse
 from datetime import datetime as dt, timedelta
 from streamlit_autorefresh import st_autorefresh
 
 from client_registry import load_registry
 from corporate_fetcher import fetch_all_corporate_actions, LOOKBACK_DAYS, LOOKAHEAD_DAYS
-from groq_engine import (fx_implication, daily_briefing, make_snapshot, GROQ_API_KEY)
+from groq_engine import fx_implication, daily_briefing, make_snapshot, GROQ_API_KEY
 from batch_manager import run_next_batch, get_progress, load_cache
 from deep_dive import run_deep_dive
 
@@ -30,35 +36,34 @@ st_autorefresh(interval=30 * 60 * 1000, key="corp_refresh")
 st.markdown("""
 <style>
   .hdr{background:#002f6c;color:#fff;padding:14px 20px;border-radius:8px;margin-bottom:4px;}
-  .batch-status{font-size:11px;color:#546e7a;text-align:right;}
-  .batch-active{color:#1D9E75;font-weight:600;}
 
-  .urgency-critical{background:#1a0505;border:1px solid #d32f2f;
-    border-left:4px solid #f44336;border-radius:8px;padding:12px 16px;margin:4px 0;
-    animation:pulse-red 2.5s ease-in-out infinite;}
-  .urgency-high{background:#1a0e05;border:1px solid #e65100;
-    border-left:4px solid #ff6d00;border-radius:8px;padding:12px 16px;margin:4px 0;}
-  .urgency-medium{background:#06111a;border:1px solid #0277bd;
-    border-left:4px solid #0288d1;border-radius:8px;padding:12px 16px;margin:4px 0;}
-  .urgency-low{background:#111;border:1px solid #222;
-    border-left:4px solid #333;border-radius:8px;padding:10px 14px;
-    margin:4px 0;opacity:0.85;}
-
-  @keyframes pulse-red{
-    0%,100%{border-left-color:#f44336;box-shadow:0 0 0 0 rgba(244,67,54,0);}
-    50%{border-left-color:#ff8a80;box-shadow:0 0 8px 2px rgba(244,67,54,0.15);}
+  /* Urgency cards */
+  .urgency-critical{background:#1a0505;border:1px solid #c62828;
+    border-left:5px solid #ef5350;border-radius:10px;padding:14px 18px;margin:6px 0;
+    animation:pulse-r 2.5s ease-in-out infinite;}
+  .urgency-high{background:#1a0e05;border:1px solid #bf360c;
+    border-left:5px solid #ff6d00;border-radius:10px;padding:14px 18px;margin:6px 0;}
+  .urgency-medium{background:#06111a;border:1px solid #01579b;
+    border-left:5px solid #0288d1;border-radius:10px;padding:14px 18px;margin:6px 0;}
+  .urgency-low{background:#111;border:1px solid #1a1a1a;
+    border-left:5px solid #2a2a2a;border-radius:10px;padding:10px 14px;margin:4px 0;}
+  @keyframes pulse-r{
+    0%,100%{border-left-color:#ef5350;}
+    50%{border-left-color:#ff8a80;box-shadow:0 0 10px 2px rgba(239,83,80,.15);}
   }
 
-  .u-critical{background:#b71c1c;color:#ffcdd2;padding:2px 8px;
-    border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.04em;}
-  .u-high{background:#bf360c;color:#ffccbc;padding:2px 8px;
-    border-radius:999px;font-size:11px;font-weight:600;}
-  .u-medium{background:#01579b;color:#b3e5fc;padding:2px 8px;
-    border-radius:999px;font-size:11px;font-weight:600;}
-  .u-low{background:#212121;color:#666;padding:2px 8px;
-    border-radius:999px;font-size:11px;}
+  /* Urgency labels */
+  .u-critical{background:#b71c1c;color:#ffcdd2;padding:3px 10px;
+    border-radius:999px;font-size:12px;font-weight:700;letter-spacing:.05em;}
+  .u-high{background:#bf360c;color:#ffccbc;padding:3px 10px;
+    border-radius:999px;font-size:12px;font-weight:600;}
+  .u-medium{background:#01579b;color:#b3e5fc;padding:3px 10px;
+    border-radius:999px;font-size:12px;font-weight:600;}
+  .u-low{background:#212121;color:#555;padding:3px 10px;
+    border-radius:999px;font-size:12px;}
 
-  .pill{display:inline-block;padding:2px 9px;border-radius:999px;
+  /* Action pills */
+  .pill{display:inline-block;padding:3px 10px;border-radius:999px;
     font-size:11px;font-weight:600;margin-right:4px;}
   .p-div{background:#1a3d1a;color:#81c784;}
   .p-divsp{background:#0d3320;color:#a5d6a7;border:1px solid #2e7d32;}
@@ -66,43 +71,70 @@ st.markdown("""
   .p-fdi{background:#1a2d3d;color:#90caf9;}
   .p-buy{background:#3d2a1a;color:#ffcc80;}
   .p-strat{background:#2d2a1a;color:#fff176;}
-  .p-split{background:#2a2a2a;color:#aaa;}
+  .p-split{background:#222;color:#888;}
   .p-ipo{background:#1a1a3d;color:#b39ddb;}
-  .p-news{background:#1e1e1e;color:#777;}
 
+  /* Badges */
   .client-badge{background:#0d2137;border:1px solid #1976d2;color:#64b5f6;
     padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;}
-  .non-client-badge{background:#1e1e1e;border:1px solid #333;color:#555;
+  .non-cl-badge{background:#1e1e1e;border:1px solid #333;color:#555;
     padding:2px 9px;border-radius:999px;font-size:11px;}
-  .unverified-badge{background:#1a1a10;border:1px solid #555;color:#888;
+  .new-badge{background:#1b5e20;color:#a5d6a7;padding:2px 9px;
+    border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.06em;
+    animation:pulse-g 2s ease-in-out infinite;}
+  @keyframes pulse-g{0%,100%{opacity:1;}50%{opacity:.7;}}
+  .unver-badge{background:#1a1a10;border:1px solid #444;color:#777;
     padding:1px 7px;border-radius:999px;font-size:10px;font-style:italic;}
-  .new-today{background:#1b5e20;color:#a5d6a7;padding:1px 7px;
-    border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.05em;}
 
-  .fx-line{background:#06111a;border-left:2px solid #0288d1;padding:6px 10px;
-    border-radius:0 6px 6px 0;font-size:12px;color:#90caf9;
-    margin-top:6px;line-height:1.5;}
+  /* Date — large and prominent */
+  .event-date{font-size:15px;font-weight:600;color:#90a4ae;letter-spacing:.03em;
+    margin-bottom:4px;}
+  .event-date-rel{font-size:11px;color:#546e7a;margin-left:6px;}
 
+  /* Headline */
+  .headline{font-size:15px;font-weight:500;color:#eceff1;margin:6px 0 5px;
+    line-height:1.45;}
+
+  /* FX line */
+  .fx-line{background:#06111a;border-left:2px solid #0288d1;padding:7px 12px;
+    border-radius:0 6px 6px 0;font-size:13px;color:#90caf9;margin-top:8px;
+    line-height:1.5;}
+
+  /* Source link */
+  .src-link{font-size:11px;color:#37474f;text-decoration:none;}
+  .src-link:hover{color:#64b5f6;}
+
+  /* Sub-events (grouped below lead) */
+  .sub-event{background:#0d0d0d;border-left:2px solid #1a1a1a;
+    border-radius:0 6px 6px 0;padding:8px 12px;margin-top:6px;}
+  .sub-headline{font-size:13px;color:#9e9e9e;line-height:1.4;}
+  .sub-date{font-size:11px;color:#424242;margin-bottom:2px;}
+
+  /* Counters */
   .counter-bar{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;}
-  .cc{border-radius:8px;padding:10px 12px;text-align:center;flex:1;min-width:70px;}
-  .cc-critical{background:#1a0505;border:1px solid #d32f2f;}
-  .cc-high{background:#1a0e05;border:1px solid #e65100;}
-  .cc-medium{background:#06111a;border:1px solid #0277bd;}
-  .cc-low{background:#111;border:1px solid #333;}
-  .cc-num{font-size:20px;font-weight:500;}
-  .cc-lbl{font-size:10px;opacity:.65;margin-top:1px;}
+  .cc{border-radius:8px;padding:10px 14px;text-align:center;flex:1;min-width:70px;}
+  .cc-critical{background:#1a0505;border:1px solid #c62828;}
+  .cc-high{background:#1a0e05;border:1px solid #bf360c;}
+  .cc-medium{background:#06111a;border:1px solid #01579b;}
+  .cc-low{background:#111;border:1px solid #222;}
+  .cc-nc{background:#0a0a0a;border:1px solid #1a1a1a;}
+  .cc-num{font-size:22px;font-weight:500;}
+  .cc-lbl{font-size:10px;opacity:.6;margin-top:2px;}
 
-  .non-client-box{background:#0d0d0d;border:1px solid #2a2a2a;
-    border-radius:8px;padding:12px 14px;margin-top:4px;}
-  .nc-item{padding:6px 0;border-bottom:1px solid #1a1a1a;font-size:12px;}
+  /* Non-client box */
+  .nc-box{background:#0a0a0a;border:1px solid #1e1e1e;border-radius:8px;
+    padding:12px 14px;}
+  .nc-item{padding:7px 0;border-bottom:1px solid #141414;}
   .nc-item:last-child{border-bottom:none;}
 
-  .dd-event{border-radius:8px;padding:12px 14px;margin-bottom:8px;border:1px solid #222;}
-  .dd-high{border-left:3px solid #f44336;background:#1a0505;}
+  /* Score chip */
+  .score-chip{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;}
+
+  /* Deep dive */
+  .dd-event{border-radius:8px;padding:12px 14px;margin-bottom:8px;border:1px solid #1a1a1a;}
+  .dd-high{border-left:3px solid #ef5350;background:#1a0505;}
   .dd-medium{border-left:3px solid #ff6d00;background:#1a0e05;}
-  .dd-low{border-left:3px solid #333;background:#111;}
-  .dd-type{display:inline-block;font-size:10px;font-weight:600;padding:1px 7px;
-    border-radius:999px;background:#1a2d3d;color:#90caf9;margin-right:4px;}
+  .dd-low{border-left:3px solid #2a2a2a;background:#0a0a0a;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -112,8 +144,9 @@ st.markdown("""
 def is_special_div(a):
     h   = (a.get("headline","") + " " + a.get("raw_detail","")).lower()
     amt = a.get("amount") or 0
-    return any(w in h for w in ["special","extraordinary","one-time","interim",
-               "repatriat","bumper","enhanced"]) or amt >= 15
+    return (any(w in h for w in ["special","extraordinary","one-time","interim",
+                                  "repatriat","bumper","enhanced"])
+            or amt >= 15)
 
 ACTION_SCORES = {
     "Dividend_Special":30,"M&A":30,"FDI":25,"Dividend":15,
@@ -130,7 +163,6 @@ def score_action(a):
     elif exp >= 500:  total += 12
     elif exp >= 100:  total += 6
     elif exp > 0:     total += 2
-    # Non-client significant deal gets a boost
     if not a.get("is_scb_client") and atype in ("M&A","FDI","IPO"):
         sig = a.get("_significance","")
         if sig == "High":   total += 15
@@ -151,8 +183,76 @@ def urgency(score):
     if score >= 35: return "medium"
     return "low"
 
-MINIMUM_SCORE       = 25
-NON_CLIENT_MIN      = 35   # higher bar for non-pipeline companies
+MINIMUM_SCORE  = 25
+NON_CLIENT_MIN = 35
+
+
+# ─── NEW flag ─────────────────────────────────────────────────────────────────
+
+def is_new(action: dict) -> bool:
+    """
+    True if:
+      - first_seen within last 7 days (entered our system recently)
+      - AND event_date within last 30 days (actual event is recent, not old news)
+    """
+    try:
+        first = action.get("_first_seen","")
+        if first:
+            days_since_first = (datetime.date.today() -
+                                datetime.date.fromisoformat(str(first)[:10])).days
+            if days_since_first > 7:
+                return False
+
+        # Use Groq-extracted event date if available, else article date
+        ev_date_str = action.get("_event_date") or action.get("date","")
+        if ev_date_str:
+            days_since_event = (datetime.date.today() -
+                                datetime.date.fromisoformat(str(ev_date_str)[:10])).days
+            return days_since_event <= 30
+    except Exception:
+        pass
+    return False
+
+
+# ─── Source link helper ───────────────────────────────────────────────────────
+
+def source_link(action: dict) -> str:
+    """Return a usable URL — real article URL or Google News search fallback."""
+    url = action.get("url","").strip()
+    if url and url.startswith("http") and len(url) > 15:
+        return url
+    # Build Google News search fallback
+    query = action.get("headline","")[:80]
+    if not query:
+        query = action.get("company_name","") + " corporate action India"
+    enc = urllib.parse.quote_plus(query)
+    return f"https://news.google.com/search?q={enc}&hl=en-IN&gl=IN"
+
+def source_label(action: dict) -> str:
+    s = action.get("source","").split("—")[0].strip()[:20]
+    colors = {"NSE":"#1565c0","yfinance":"#2e7d32","FMP":"#6a1b9a",
+              "Google":"#0277bd","Groq":"#534AB7","News":"#e65100"}
+    c = next((v for k,v in colors.items() if k in s), "#444")
+    return f'<span style="font-size:11px;font-weight:600;color:{c};">{s}</span>'
+
+
+# ─── Date display helper ──────────────────────────────────────────────────────
+
+def format_date(date_str: str) -> str:
+    """Return a large readable date with relative label."""
+    try:
+        d     = datetime.date.fromisoformat(str(date_str)[:10])
+        delta = (datetime.date.today() - d).days
+        nice  = d.strftime("%-d %b %Y")   # e.g. "16 Apr 2026"
+        if delta == 0:   rel = "today"
+        elif delta == 1: rel = "yesterday"
+        elif delta < 0:  rel = f"in {abs(delta)}d"
+        elif delta < 7:  rel = f"{delta}d ago"
+        elif delta < 30: rel = f"{delta//7}w ago"
+        else:            rel = f"{delta//30}mo ago"
+        return nice, rel
+    except Exception:
+        return str(date_str)[:10], ""
 
 
 # ─── UI helpers ──────────────────────────────────────────────────────────────
@@ -163,127 +263,201 @@ def action_pill(a):
     MAP   = {
         "Dividend":   ("p-div",   "Dividend"),
         "M&A":        ("p-ma",    "M&A"),
-        "FDI":        ("p-fdi",   "FDI / Capital raise"),
+        "FDI":        ("p-fdi",   "FDI"),
         "Buyback":    ("p-buy",   "Buyback"),
         "Strategic":  ("p-strat", "Strategic"),
         "Stock Split": ("p-split", "Split"),
         "IPO":        ("p-ipo",   "IPO"),
-        "Other":      ("p-news",  "News"),
+        "Other":      ("p-split", "News"),
     }
-    cls, lbl = MAP.get(atype, ("p-news", atype))
+    cls, lbl = MAP.get(atype, ("p-split", atype))
     if sp: cls, lbl = "p-divsp", "Special dividend"
     return f'<span class="pill {cls}">{lbl}</span>'
 
 def urgency_pill(score):
-    u = urgency(score)
-    MAP = {"critical":("u-critical","CRITICAL"),"high":("u-high","HIGH"),
-           "medium":("u-medium","MEDIUM"),"low":("u-low","LOW")}
+    u   = urgency(score)
+    MAP = {"critical":("u-critical","CRITICAL"),
+           "high":("u-high","HIGH"),
+           "medium":("u-medium","MEDIUM"),
+           "low":("u-low","LOW")}
     cls, lbl = MAP[u]
     return f'<span class="{cls}">{lbl}</span>'
 
-def is_today(a):
-    try:
-        return (datetime.date.today() -
-                datetime.date.fromisoformat(a.get("date","")[:10])).days <= 1
-    except: return False
-
-def src_tag(s):
-    colors = {"NSE":"#1565c0","yfinance":"#2e7d32","FMP":"#6a1b9a",
-              "News":"#e65100","Google":"#0277bd","Groq":"#534AB7"}
-    c = next((v for k,v in colors.items() if k in s), "#555")
-    return f'<span style="font-size:10px;font-weight:600;color:{c};">{s.split("—")[0].strip()[:25]}</span>'
-
-def score_chip(score):
+def sc_chip(score):
     u  = urgency(score)
-    sc = {"critical":"#ef5350","high":"#ff6d00","medium":"#0288d1","low":"#444"}[u]
-    return (f'<span style="font-size:11px;font-weight:600;padding:1px 7px;'
-            f'border-radius:999px;background:{sc}22;color:{sc};border:1px solid {sc}55;">'
+    c  = {"critical":"#ef5350","high":"#ff6d00","medium":"#0288d1","low":"#444"}[u]
+    return (f'<span class="score-chip" '
+            f'style="background:{c}18;color:{c};border:1px solid {c}44;">'
             f'{score}</span>')
 
-def render_card(action, expanded=False):
-    score   = action["_score"]
-    u       = action["_urgency"]
-    client  = action.get("client")
-    sp_div  = action["action_type"]=="Dividend" and is_special_div(action)
-    today   = is_today(action)
-    low_conf = action.get("_groq_confidence") == "low"
 
+# ─── Group actions by MNC parent ─────────────────────────────────────────────
+
+def group_by_mnc(actions: list) -> list:
+    """
+    Returns list of groups, each group = {
+      "mnc_parent": str,
+      "lead":       action dict (highest score),
+      "others":     [remaining action dicts sorted by score desc]
+    }
+    Groups sorted by lead score desc.
+    Actions without a client go in their own single-item groups.
+    """
+    from collections import defaultdict
+    buckets = defaultdict(list)
+
+    for a in actions:
+        client = a.get("client") or {}
+        key    = client.get("client_group","") or a.get("company_name","Unknown")
+        buckets[key].append(a)
+
+    groups = []
+    for mnc, items in buckets.items():
+        items_sorted = sorted(items, key=lambda x: x["_score"], reverse=True)
+        groups.append({
+            "mnc_parent": mnc,
+            "lead":       items_sorted[0],
+            "others":     items_sorted[1:],
+        })
+
+    groups.sort(key=lambda g: g["lead"]["_score"], reverse=True)
+    return groups
+
+
+# ─── Card renderer ────────────────────────────────────────────────────────────
+
+def render_group(group: dict):
+    lead      = group["lead"]
+    others    = group["others"]
+    score     = lead["_score"]
+    u         = lead["_urgency"]
+    client    = lead.get("client") or {}
+    sp_div    = lead["action_type"]=="Dividend" and is_special_div(lead)
+    new_flag  = is_new(lead)
+    low_conf  = lead.get("_groq_confidence") == "low"
+
+    nice_date, rel = format_date(lead.get("date",""))
+
+    # Client info
     if client:
-        info = (f'<strong style="color:#fff;">{client["indian_subsidiary"]}</strong>'
-                f' → <span style="color:#64b5f6;">{client["client_group"]}</span>'
-                f' &nbsp;·&nbsp; <strong style="color:#a5d6a7;">'
-                f'${client.get("net_nih_exposure",0):,.0f}M</strong>')
+        client_info = (
+            f'<strong style="color:#eceff1;">{client.get("indian_subsidiary","")}</strong>'
+            f' &nbsp;→&nbsp; <span style="color:#64b5f6;">{client.get("client_group","")}</span>'
+            f' &nbsp;·&nbsp; <strong style="color:#a5d6a7;">'
+            f'${client.get("net_nih_exposure",0):,.0f}M</strong>'
+        )
     else:
-        info = f'<span style="color:#666;">{action["company_name"]}</span>'
+        client_info = f'<span style="color:#555;">{lead.get("company_name","")}</span>'
 
+    # Amount
     amt_str = ""
-    if action.get("amount") and action.get("currency")=="INR":
-        amt_str = f' &nbsp;·&nbsp; <strong style="color:#a5d6a7;">₹{action["amount"]:,.2f}/sh</strong>'
-    elif action.get("amount") and action.get("currency")=="USD":
-        amt_str = f' &nbsp;·&nbsp; <strong style="color:#90caf9;">${action["amount"]:,.0f}M</strong>'
+    if lead.get("amount") and lead.get("currency")=="INR":
+        amt_str = f' &nbsp;·&nbsp; <strong style="color:#a5d6a7;">₹{lead["amount"]:,.2f}/sh</strong>'
+    elif lead.get("amount") and lead.get("currency")=="USD":
+        amt_str = f' &nbsp;·&nbsp; <strong style="color:#90caf9;">${lead["amount"]:,.0f}M</strong>'
 
-    fe_str = (f' &nbsp;·&nbsp; <span style="color:#ffcc80;font-size:11px;">'
-              f'↔ {action["foreign_entity"]}</span>'
-              if action.get("foreign_entity") else "")
+    # Foreign entity
+    fe_str = (f' &nbsp;·&nbsp; <span style="color:#ffcc80;">↔ {lead["foreign_entity"]}</span>'
+              if lead.get("foreign_entity") else "")
 
-    new_badge    = '<span class="new-today">NEW TODAY</span> ' if today else ""
-    unver_badge  = '<span class="unverified-badge">unverified</span> ' if low_conf else ""
-    client_badge = ('<span class="client-badge">Current client</span>'
-                    if action["is_scb_client"] else
-                    '<span class="non-client-badge">Non-client</span>')
+    # Client/non-client badge
+    cl_badge = ('<span class="client-badge">Current client</span>'
+                if lead["is_scb_client"] else
+                '<span class="non-cl-badge">Non-client</span>')
 
-    # FX implication — fetch for high/critical SCB client actions
-    fx_line = ""
-    if action["is_scb_client"] and score >= 50 and GROQ_API_KEY and client:
-        amt_display = (f"₹{action['amount']:.2f}/share"
-                       if action.get("amount") and action.get("currency")=="INR"
-                       else (f"${action['amount']:.0f}M"
-                             if action.get("amount") else ""))
+    # New badge
+    new_html  = '<span class="new-badge">NEW</span> ' if new_flag else ""
+    unver_html = '<span class="unver-badge">unverified</span> ' if low_conf else ""
+
+    # Source link
+    link = source_link(lead)
+    link_html = f'<a href="{link}" target="_blank" class="src-link">📰 {source_label(lead)} →</a>'
+
+    # Others count
+    others_label = f" +{len(others)} more" if others else ""
+
+    # FX implication for high/critical SCB clients
+    fx_html = ""
+    if lead["is_scb_client"] and score >= 50 and GROQ_API_KEY and client:
+        amt_display = (f"₹{lead['amount']:.2f}/share"
+                       if lead.get("amount") and lead.get("currency")=="INR"
+                       else f"${lead['amount']:.0f}M" if lead.get("amount") else "")
         impl = fx_implication(
-            action["headline"],
-            action["action_type"],
+            lead["headline"], lead["action_type"],
             client.get("indian_subsidiary",""),
             client.get("client_group",""),
             amt_display,
             float(client.get("net_nih_exposure",0) or 0),
         )
         if impl:
-            fx_line = f'<div class="fx-line">FX → {impl}</div>'
+            fx_html = f'<div class="fx-line">FX → {impl}</div>'
 
-    with st.expander(
+    # Sub-events HTML
+    sub_html = ""
+    for o in others:
+        o_nice, o_rel = format_date(o.get("date",""))
+        o_link = source_link(o)
+        sub_html += f"""
+        <div class="sub-event">
+          <div class="sub-date">{o_nice}
+            {f'<span style="font-size:10px;color:#424242;">· {o_rel}</span>' if o_rel else ""}
+          </div>
+          <div class="sub-headline">
+            {action_pill(o)}
+            {o['headline'][:160]}
+            &nbsp;
+            <a href="{o_link}" target="_blank" class="src-link">→</a>
+          </div>
+        </div>
+        """
+
+    # Title for expander
+    exp_title = (
         f"{'★ ' if u=='critical' else ''}"
-        f"{action['date']}  ·  {action['action_type']}"
-        f"{'  ★' if sp_div else ''}  ·  {action['company_name'][:50]}",
-        expanded=expanded
-    ):
+        f"{group['mnc_parent'][:40]}"
+        f" · {lead['action_type']}{'★' if sp_div else ''}"
+        f"{others_label}"
+    )
+
+    with st.expander(exp_title,
+                     expanded=(u in ("critical","high") and lead["is_scb_client"])):
         st.markdown(f"""
         <div class="urgency-{u}">
-          <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
-            {urgency_pill(score)} {action_pill(action)}
-            {client_badge} {score_chip(score)} {new_badge}{unver_badge}
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
+            {urgency_pill(score)} {action_pill(lead)}
+            {cl_badge} {sc_chip(score)} {new_html}{unver_html}
           </div>
-          <div style="font-size:14px;font-weight:500;color:#e0e0e0;
-                      margin:5px 0 4px;line-height:1.4;">
-            {action['headline'][:200]}
+
+          <div class="event-date">
+            {nice_date}
+            {f'<span class="event-date-rel">({rel})</span>' if rel else ""}
           </div>
-          <div style="font-size:12px;color:#888;">{info}{amt_str}{fe_str}</div>
-          <div style="font-size:11px;color:#444;margin-top:3px;">
-            {src_tag(action['source'])} &nbsp;·&nbsp; {action['date']}
-            {"&nbsp;·&nbsp;<a href='" + action['url'] + "' target='_blank' style='color:#333;font-size:11px;'>→</a>" if action.get('url') else ""}
+
+          <div class="headline">{lead['headline'][:220]}</div>
+
+          <div style="font-size:12px;color:#78909c;margin-top:3px;">
+            {client_info}{amt_str}{fe_str}
           </div>
-          {"<div style='font-size:12px;color:#555;margin-top:5px;'>" + action['raw_detail'][:180] + "</div>" if action.get('raw_detail') else ""}
-          {fx_line}
+
+          {fx_html}
+
+          <div style="margin-top:8px;display:flex;align-items:center;gap:10px;">
+            {link_html}
+            {f"<span style='font-size:11px;color:#37474f;'>· {lead.get('raw_detail','')[:100]}</span>" if lead.get('raw_detail') else ""}
+          </div>
+
+          {sub_html}
         </div>
         """, unsafe_allow_html=True)
 
 
-# ─── Load data ────────────────────────────────────────────────────────────────
+# ─── Load registry ────────────────────────────────────────────────────────────
 
 st.markdown("""
 <div class="hdr">
   <strong style="font-size:18px;">🏦 SCB — Corporate Actions Intelligence</strong><br>
   <span style="font-size:12px;opacity:0.8;">
-    MNC subsidiaries · SCB FX Pipeline v7 · AI-powered classification + FX signals
+    MNC subsidiaries · SCB FX Pipeline v7 · INR-relevant events only
   </span>
 </div>
 """, unsafe_allow_html=True)
@@ -291,18 +465,6 @@ st.markdown("""
 with st.spinner("Loading registry..."):
     registry = load_registry()
 
-# Run next batch in background (staggered, 25-min cooldown)
-with st.spinner("Running web search batch..."):
-    try:
-        cache    = run_next_batch(registry)
-        progress = get_progress(registry, cache)
-    except Exception:
-        cache    = load_cache()
-        progress = {"total":len(registry["all"]),"fresh_24h":0,
-                    "pct":0,"next_in_mins":25,"batches_left":20,
-                    "last_run_mins_ago":None}
-
-# Tabs
 tab_live, tab_dive = st.tabs(["📡  Live Monitor", "🔍  Client Deep Dive"])
 
 
@@ -311,47 +473,48 @@ tab_live, tab_dive = st.tabs(["📡  Live Monitor", "🔍  Client Deep Dive"])
 # ═══════════════════════════════════════════════════════════════════════════
 with tab_live:
 
-    # Stats row + batch progress top-right
+    # Stats row
     c1,c2,c3,c4 = st.columns([2,2,2,2])
     with c1: st.metric("Monitored", len(registry["all"]))
-    with c2: st.metric("Tickers", len(registry["by_ticker"]))
+    with c2: st.metric("Tickers",   len(registry["by_ticker"]))
     with c3: st.metric("Window",
         f"–{LOOKBACK_DAYS}d / +{LOOKAHEAD_DAYS}d",
         f"{(dt.now()-timedelta(days=LOOKBACK_DAYS)).strftime('%d %b')} → "
         f"{(dt.now()+timedelta(days=LOOKAHEAD_DAYS)).strftime('%d %b')}")
     with c4:
-        pct   = progress["pct"]
-        fresh = progress["fresh_24h"]
-        total = progress["total"]
-        nxt   = progress["next_in_mins"]
+        cache_init = load_cache()
+        prog       = get_progress(registry, cache_init)
         st.markdown(
             f'<div style="text-align:right;padding-top:4px;">'
-            f'<div style="font-size:11px;color:#546e7a;">Web search coverage</div>'
-            f'<div style="font-size:16px;font-weight:500;color:#{"1D9E75" if pct>50 else "BA7517"};">'
-            f'{fresh}/{total} clients</div>'
-            f'<div class="batch-status">Next batch in {nxt} min</div>'
+            f'<div style="font-size:11px;color:#546e7a;">Web search</div>'
+            f'<div style="font-size:16px;font-weight:500;'
+            f'color:#{"1D9E75" if prog["pct"]>50 else "BA7517"};">'
+            f'{prog["fresh_24h"]}/{prog["total"]}</div>'
+            f'<div style="font-size:11px;color:#37474f;">Next batch in {prog["next_in_mins"]}m</div>'
             f'</div>', unsafe_allow_html=True)
 
-    if st.button("⟳ Refresh now", use_container_width=False):
-        st.cache_data.clear()
-        st.rerun()
+    ref_col, _ = st.columns([1,5])
+    with ref_col:
+        if st.button("⟳ Refresh", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
 
     st.divider()
 
-    # Fetch + score
-    with st.spinner("Fetching from all sources..."):
+    # ── Fetch main feed FIRST (user sees dashboard immediately) ───────────────
+    with st.spinner("Scanning sources..."):
         raw = fetch_all_corporate_actions(registry)
 
     for a in raw:
         a["_score"]   = score_action(a)
         a["_urgency"] = urgency(a["_score"])
 
-    # Separate client vs non-client
-    client_actions     = sorted(
+    client_actions = sorted(
         [a for a in raw if a["is_scb_client"] and a["_score"] >= MINIMUM_SCORE],
         key=lambda x: x["_score"], reverse=True)
     non_client_actions = sorted(
-        [a for a in raw if not a["is_scb_client"] and a["_score"] >= NON_CLIENT_MIN
+        [a for a in raw if not a["is_scb_client"]
+         and a["_score"] >= NON_CLIENT_MIN
          and a["action_type"] not in ("Other","Stock Split")],
         key=lambda x: x["_score"], reverse=True)
 
@@ -379,9 +542,9 @@ with tab_live:
         <div class="cc-num" style="color:#555;">{len(low)}</div>
         <div class="cc-lbl" style="color:#444;">Low</div>
       </div>
-      <div class="cc" style="background:#0d0d0d;border:1px solid #2a2a2a;">
-        <div class="cc-num" style="color:#888;">{len(non_client_actions)}</div>
-        <div class="cc-lbl" style="color:#555;">Non-pipeline</div>
+      <div class="cc cc-nc">
+        <div class="cc-num" style="color:#444;">{len(non_client_actions)}</div>
+        <div class="cc-lbl" style="color:#2a2a2a;">Non-pipeline</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -404,14 +567,14 @@ with tab_live:
                 line = line.strip()
                 if not line: continue
                 line = re.sub(r'\*\*(.+?)\*\*',
-                    r'<strong style="color:#e0e0e0;">\1</strong>', line)
-                color  = "#b0bec5" if line.startswith(("•","-")) else "#546e7a"
-                prefix = "padding:2px 0 2px 4px;" if line.startswith(("•","-")) else ""
-                st.markdown(f'<div style="font-size:13px;color:{color};'
-                            f'line-height:1.75;{prefix}">{line}</div>',
-                            unsafe_allow_html=True)
+                    r'<strong style="color:#eceff1;">\1</strong>', line)
+                color = "#b0bec5" if line.startswith(("•","-")) else "#546e7a"
+                pad   = "padding:3px 0 3px 4px;" if line.startswith(("•","-")) else ""
+                st.markdown(
+                    f'<div style="font-size:13px;color:{color};line-height:1.8;{pad}">'
+                    f'{line}</div>', unsafe_allow_html=True)
         st.markdown(
-            f'<div style="font-size:10px;color:#37474f;margin-top:8px;">'
+            f'<div style="font-size:10px;color:#263238;margin-top:8px;">'
             f'Groq / Llama 3 &nbsp;·&nbsp; {len(snapshot)} signals &nbsp;·&nbsp; '
             f'Cached 30 min</div></div>', unsafe_allow_html=True)
 
@@ -423,30 +586,29 @@ with tab_live:
         f_type = st.selectbox("Action type",
             ["All"] + sorted({a["action_type"] for a in client_actions}))
     with fc2:
-        f_urg = st.selectbox("Min urgency",
+        f_urg  = st.selectbox("Min urgency",
             ["All","Medium+","High+","Critical only"])
     with fc3:
-        f_src = st.selectbox("Source",
-            ["All"] + sorted({a["source"].split("—")[0].strip()
-                              for a in client_actions}))
+        new_only = st.toggle("NEW only", value=False,
+                             help="Show only events flagged as new this week")
 
     def apply_f(lst):
         if f_type != "All":  lst = [a for a in lst if a["action_type"]==f_type]
-        if f_urg == "Medium+":
+        if f_urg  == "Medium+":
             lst = [a for a in lst if a["_urgency"] in ("critical","high","medium")]
         elif f_urg == "High+":
             lst = [a for a in lst if a["_urgency"] in ("critical","high")]
         elif f_urg == "Critical only":
             lst = [a for a in lst if a["_urgency"]=="critical"]
-        if f_src != "All":
-            lst = [a for a in lst if f_src in a["source"]]
+        if new_only:
+            lst = [a for a in lst if is_new(a)]
         return lst
 
     filtered = apply_f(client_actions)
     st.caption(
         f"**{len(filtered)} current client actions** · "
-        f"{len(non_client_actions)} non-pipeline companies · "
-        f"Min score {MINIMUM_SCORE}"
+        f"{len(non_client_actions)} non-pipeline · "
+        f"{sum(1 for a in filtered if is_new(a))} new this week"
     )
 
     # Main columns
@@ -454,96 +616,91 @@ with tab_live:
 
     with col_feed:
         if not filtered:
-            st.info("No actions match filters.")
+            st.info("No actions match filters. Try adjusting or refreshing.")
         else:
-            for action in filtered[:60]:
-                render_card(
-                    action,
-                    expanded=(action["_urgency"] in ("critical","high"))
-                )
+            groups = group_by_mnc(filtered)
+            for grp in groups[:50]:
+                render_group(grp)
 
-        # Non-client important companies box
+        # Non-client box
         if non_client_actions:
             st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
             with st.expander(
                 f"🔭  Non-pipeline companies with significant activity  "
-                f"({len(non_client_actions)} found)",
+                f"({len(non_client_actions)} found) — consider adding to Excel",
                 expanded=False
             ):
-                st.caption(
-                    "These companies are NOT in your SCB pipeline. "
-                    "Consider whether any should be added to the Excel."
-                )
-                st.markdown('<div class="non-client-box">', unsafe_allow_html=True)
+                st.markdown('<div class="nc-box">', unsafe_allow_html=True)
                 for a in non_client_actions[:20]:
-                    sig_col = {"M&A":"#ef9a9a","FDI":"#90caf9","IPO":"#b39ddb",
-                               "Buyback":"#ffcc80","Strategic":"#fff176"}.get(
-                               a["action_type"],"#888")
+                    nice_date, rel = format_date(a.get("date",""))
+                    link = source_link(a)
+                    sig_color = {"M&A":"#ef9a9a","FDI":"#90caf9","IPO":"#b39ddb",
+                                 "Buyback":"#ffcc80","Strategic":"#fff176"}.get(
+                                 a["action_type"],"#666")
                     amt_str = ""
                     if a.get("amount"):
-                        curr = a.get("currency","")
-                        sym  = "₹" if curr=="INR" else "$"
-                        amt_str = f' · <strong>{sym}{a["amount"]:,.0f}</strong>'
-                    fe_str = f' · <span style="color:#ffcc80;">{a["foreign_entity"]}</span>' if a.get("foreign_entity") else ""
+                        sym = "₹" if a.get("currency")=="INR" else "$"
+                        amt_str = f' · {sym}{a["amount"]:,.0f}'
+                    fe_str = (f' · <span style="color:#ffcc80;">{a["foreign_entity"]}</span>'
+                              if a.get("foreign_entity") else "")
+                    new_html = '<span class="new-badge" style="font-size:9px;padding:1px 5px;">NEW</span> ' if is_new(a) else ""
                     st.markdown(f"""
                     <div class="nc-item">
-                      <span style="font-size:11px;font-weight:600;color:{sig_col};">
-                        {a['action_type']}
-                      </span>
-                      &nbsp;
-                      <span style="color:#ccc;">{a['company_name'][:50]}</span>
-                      {amt_str}{fe_str}
-                      <span style="color:#444;font-size:10px;"> · {a['date']}</span>
-                      <div style="font-size:11px;color:#666;margin-top:2px;">
-                        {a['headline'][:120]}
+                      <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;">
+                        <span style="font-size:12px;font-weight:600;color:{sig_color};">{a['action_type']}</span>
+                        <span style="font-size:13px;color:#ccc;">{a['company_name'][:50]}</span>
+                        {new_html}
+                        <span style="font-size:11px;color:#37474f;">{amt_str}{fe_str}</span>
+                      </div>
+                      <div style="font-size:12px;color:#546e7a;">
+                        <strong style="color:#78909c;">{nice_date}</strong>
+                        {f'<span style="color:#37474f;"> · {rel}</span>' if rel else ""}
+                        &nbsp;·&nbsp; {a['headline'][:110]}
+                        &nbsp;<a href="{link}" target="_blank" style="color:#37474f;font-size:11px;">→</a>
                       </div>
                     </div>
                     """, unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
 
     with col_right:
-        # Urgency breakdown
         st.markdown("**Urgency breakdown**")
-        for lbl, grp, col in [
+        for lbl, grp_list, col in [
             ("Critical (70+)", critical, "#ef5350"),
             ("High (50–69)",   high,     "#ff6d00"),
             ("Medium (35–49)", medium,   "#0288d1"),
             ("Low (25–34)",    low,      "#444"),
         ]:
-            if grp:
+            if grp_list:
                 st.markdown(
-                    f'<div style="font-size:12px;color:#ccc;margin:3px 0;">'
-                    f'{lbl} &nbsp;<strong style="color:{col};">{len(grp)}</strong></div>',
+                    f'<div style="font-size:12px;color:#90a4ae;margin:3px 0;">'
+                    f'{lbl} <strong style="color:{col};">{len(grp_list)}</strong></div>',
                     unsafe_allow_html=True)
 
         st.divider()
-
-        # Web search progress
-        st.markdown("**Web search progress**")
-        pct = progress["pct"]
-        st.progress(pct / 100)
+        st.markdown("**Web search**")
+        st.progress(prog["pct"] / 100)
         st.markdown(
             f'<div style="font-size:11px;color:#546e7a;">'
-            f'{progress["fresh_24h"]}/{progress["total"]} clients (last 24h)<br>'
-            f'{progress["batches_left"]} batches remaining<br>'
-            f'Next batch in {progress["next_in_mins"]} min</div>',
+            f'{prog["fresh_24h"]}/{prog["total"]} clients (24h)<br>'
+            f'{prog["batches_left"]} batches left<br>'
+            f'Next in {prog["next_in_mins"]}m</div>',
             unsafe_allow_html=True)
 
         st.divider()
-
-        # Current client highlights
-        st.markdown("**Current client highlights**")
-        for a in [x for x in filtered if x["is_scb_client"]][:5]:
+        st.markdown("**Client highlights**")
+        shown_mncs = set()
+        for a in filtered[:10]:
             c  = a.get("client") or {}
+            mn = c.get("client_group","")
+            if mn in shown_mncs: continue
+            shown_mncs.add(mn)
             uc = {"critical":"#ef5350","high":"#ff6d00",
                   "medium":"#0288d1","low":"#444"}[a["_urgency"]]
             st.markdown(f"""
             <div style="border:1px solid #1e3a5f;border-left:3px solid {uc};
-                        border-radius:6px;padding:8px 10px;margin-bottom:6px;">
-              <div style="font-size:11px;font-weight:600;color:#64b5f6;">
-                {c.get('client_group','')}
-              </div>
-              <div style="font-size:11px;color:#ccc;">{c.get('indian_subsidiary','')[:35]}</div>
+                        border-radius:6px;padding:8px 10px;margin-bottom:5px;">
+              <div style="font-size:11px;font-weight:600;color:#64b5f6;">{mn}</div>
+              <div style="font-size:11px;color:#90a4ae;">{c.get('indian_subsidiary','')[:35]}</div>
               <div style="margin-top:4px;display:flex;gap:5px;align-items:center;">
                 {action_pill(a)}
                 <span style="font-size:10px;color:{uc};font-weight:600;">{a['_score']}</span>
@@ -552,44 +709,65 @@ with tab_live:
             """, unsafe_allow_html=True)
 
         st.divider()
-
-        # By action type
-        st.markdown("**By action type**")
+        st.markdown("**By type**")
         tc = {}
         for a in filtered:
-            k = "Special div." if a["action_type"]=="Dividend" and is_special_div(a) else a["action_type"]
+            k = ("Special div."
+                 if a["action_type"]=="Dividend" and is_special_div(a)
+                 else a["action_type"])
             tc[k] = tc.get(k,0)+1
         for k,v in sorted(tc.items(),key=lambda x:-x[1]):
             st.markdown(
-                f'<div style="font-size:12px;color:#aaa;margin:2px 0;">'
-                f'{k} <strong style="color:#fff;">{v}</strong></div>',
+                f'<div style="font-size:12px;color:#78909c;margin:2px 0;">'
+                f'{k} <strong style="color:#eceff1;">{v}</strong></div>',
                 unsafe_allow_html=True)
 
-    # Full data table
+    # Data table
     st.divider()
     with st.expander("📄 Full data table + CSV", expanded=False):
-        all_display = filtered + non_client_actions
-        if all_display:
+        all_rows = filtered + non_client_actions
+        if all_rows:
             rows = [{
                 "Score":    a["_score"],
                 "Urgency":  a["_urgency"].title(),
+                "New":      "✓" if is_new(a) else "",
                 "Client":   "Yes" if a["is_scb_client"] else "No",
-                "Date":     a["date"],
+                "Date":     a.get("date",""),
                 "Action":   ("Special div." if a["action_type"]=="Dividend"
                              and is_special_div(a) else a["action_type"]),
-                "Company":  a["company_name"][:40],
-                "Headline": a["headline"][:80],
-                "Amount":   a.get("amount"),
-                "Currency": a.get("currency"),
-                "Source":   a["source"][:30],
+                "Company":  a.get("company_name","")[:40],
+                "Headline": a.get("headline","")[:80],
                 "MNC":      (a.get("client") or {}).get("client_group","—"),
                 "NIH $M":   (a.get("client") or {}).get("net_nih_exposure"),
-            } for a in all_display]
+                "Source":   a.get("source","")[:25],
+                "Link":     source_link(a),
+            } for a in all_rows]
             df = pd.DataFrame(rows)
             st.dataframe(df, use_container_width=True, hide_index=True)
-            st.download_button("⬇️ Download CSV",
+            st.download_button("⬇️ CSV",
                 df.to_csv(index=False),
-                f"scb_corp_{dt.now().strftime('%Y%m%d_%H%M')}.csv","text/csv")
+                f"scb_{dt.now().strftime('%Y%m%d_%H%M')}.csv","text/csv")
+
+    # ── Run batch AFTER feed is rendered ──────────────────────────────────────
+    batch_placeholder = st.empty()
+    with batch_placeholder.container():
+        batch_status = st.empty()
+        batch_status.markdown(
+            '<div style="font-size:11px;color:#263238;text-align:right;">'
+            'Running web search batch...</div>',
+            unsafe_allow_html=True)
+    try:
+        updated_cache = run_next_batch(registry)
+        new_prog      = get_progress(registry, updated_cache)
+        batch_status.markdown(
+            f'<div style="font-size:11px;color:#1b5e20;text-align:right;">'
+            f'✓ Batch complete · {new_prog["fresh_24h"]}/{new_prog["total"]} clients updated</div>',
+            unsafe_allow_html=True)
+    except Exception as ex:
+        batch_status.markdown(
+            f'<div style="font-size:11px;color:#37474f;text-align:right;">'
+            f'Batch skipped: {str(ex)[:40]}</div>',
+            unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -600,9 +778,9 @@ with tab_dive:
     <div style="background:#0a1628;border:1px solid #1e3a5f;border-radius:10px;
                 padding:14px 18px;margin-bottom:18px;">
       <strong style="color:#64b5f6;">Client Deep Dive</strong>
-      <div style="font-size:12px;color:#78909c;margin-top:4px;">
-        Select any client · searches past 12 months · Groq extracts
-        significant corporate actions only
+      <div style="font-size:12px;color:#546e7a;margin-top:4px;">
+        12 months · Google News + ET + BS + Moneycontrol · Groq extracts
+        INR-relevant events only
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -623,22 +801,21 @@ with tab_dive:
     sel_rec = next((r for l,r in options if l==sel_label), None)
 
     if sel_rec:
-        sub = sel_rec["indian_subsidiary"]
-        grp = sel_rec["client_group"]
-        exp = sel_rec.get("net_nih_exposure",0) or 0
-        tier= sel_rec.get("priority_tier","")
-
+        sub  = sel_rec["indian_subsidiary"]
+        grp  = sel_rec["client_group"]
+        exp  = sel_rec.get("net_nih_exposure",0) or 0
+        tier = sel_rec.get("priority_tier","")
         st.markdown(f"""
         <div style="border:1px solid #1e3a5f;border-radius:8px;
                     padding:12px 16px;margin-bottom:16px;background:#06111a;">
-          <div style="font-size:13px;font-weight:500;color:#fff;">{sub}</div>
+          <div style="font-size:14px;font-weight:500;color:#eceff1;">{sub}</div>
           <div style="font-size:12px;color:#64b5f6;">{grp}</div>
-          <div style="font-size:11px;color:#546e7a;margin-top:4px;">
+          <div style="font-size:11px;color:#37474f;margin-top:4px;">
             NIH: <strong style="color:#a5d6a7;">${exp:,.0f}M</strong>
             &nbsp;·&nbsp; {tier[:25] if tier else '—'}
             &nbsp;·&nbsp; CIN: {sel_rec.get('cin','—')[:25]}
           </div>
-          {"<div style='font-size:11px;color:#37474f;margin-top:4px;'>Known trigger: " + sel_rec.get('event_flag','')[:120] + "</div>" if sel_rec.get('event_flag') else ""}
+          {"<div style='font-size:11px;color:#263238;margin-top:4px;'>Trigger: " + sel_rec.get('event_flag','')[:120] + "</div>" if sel_rec.get('event_flag') else ""}
         </div>
         """, unsafe_allow_html=True)
 
@@ -650,49 +827,72 @@ with tab_dive:
                 result = run_deep_dive(grp, sub, exp)
 
             st.caption(
-                f"**{result['query_count']} headlines** found · "
-                f"**{len(result['events'])} significant events** extracted · "
+                f"**{result['query_count']} headlines** · "
+                f"**{len(result['events'])} significant events** · "
                 f"{result['searched_at']}"
             )
 
             if not result["events"]:
-                st.info("No significant events found. Try refreshing.")
+                st.info("No significant INR-relevant events found.")
             else:
                 m1,m2,m3 = st.columns(3)
                 with m1: st.metric("Events", len(result["events"]))
-                with m2: st.metric("High significance",
+                with m2: st.metric("High",
                     sum(1 for e in result["events"] if e.get("significance")=="High"))
                 with m3:
                     dates = [e.get("date","") for e in result["events"] if e.get("date")]
-                    if dates:
-                        st.metric("Date range",
-                            f"{min(dates)[:7]} → {max(dates)[:7]}")
+                    if dates: st.metric("Range",
+                        f"{min(dates)[:7]} → {max(dates)[:7]}")
 
                 st.divider()
                 for ev in result["events"]:
-                    sig  = ev.get("significance","Low")
-                    css  = {"High":"dd-high","Medium":"dd-medium","Low":"dd-low"}[sig]
-                    sc   = {"High":"#ef5350","Medium":"#ff6d00","Low":"#555"}[sig]
+                    sig = ev.get("significance","Low")
+                    css = {"High":"dd-high","Medium":"dd-medium","Low":"dd-low"}[sig]
+                    sc  = {"High":"#ef5350","Medium":"#ff6d00","Low":"#555"}[sig]
+                    ev_link = ev.get("source_url","") or (
+                        f"https://news.google.com/search?q="
+                        f"{urllib.parse.quote_plus(ev.get('headline','')[:60])}"
+                        f"&hl=en-IN&gl=IN")
+                    nice_d, rel_d = format_date(ev.get("date","")[:10])
                     st.markdown(f"""
                     <div class="dd-event {css}">
-                      <div style="font-size:11px;color:#555;margin-bottom:3px;">
-                        {ev.get('date','')[:10]}
+                      <div style="font-size:13px;color:{sc};margin-bottom:2px;">
+                        <strong>{nice_d}</strong>
+                        {f'<span style="font-size:11px;color:#546e7a;"> · {rel_d}</span>' if rel_d else ""}
                         &nbsp;·&nbsp;
-                        <span style="color:{sc};font-weight:700;">{sig.upper()}</span>
+                        <span style="font-weight:700;">{sig.upper()}</span>
                         &nbsp;·&nbsp;
-                        <span class="dd-type">{ev.get('action_type','Other')}</span>
-                        {"&nbsp;·&nbsp;<span style='color:#ffcc80;font-size:10px;'>" + ev['counterparty'] + "</span>" if ev.get('counterparty') else ""}
+                        <span style="background:#1a2d3d;color:#90caf9;font-size:10px;
+                                     font-weight:600;padding:1px 7px;border-radius:999px;">
+                          {ev.get('action_type','Other')}
+                        </span>
+                        {"&nbsp;·&nbsp;<span style='color:#ffcc80;font-size:11px;'>" + ev['counterparty'] + "</span>" if ev.get('counterparty') else ""}
                       </div>
-                      <div style="font-size:13px;font-weight:500;color:#e0e0e0;margin-bottom:3px;">
+                      <div style="font-size:14px;font-weight:500;color:#eceff1;
+                                  margin:5px 0 4px;line-height:1.45;">
                         {ev.get('headline','')}
                       </div>
                       {"<div style='font-size:12px;color:#90caf9;'>FX → " + ev['fx_implication'] + "</div>" if ev.get('fx_implication') else ""}
+                      <div style="margin-top:6px;">
+                        <a href="{ev_link}" target="_blank"
+                           style="font-size:11px;color:#37474f;text-decoration:none;">
+                           📰 Read source →
+                        </a>
+                      </div>
                     </div>
                     """, unsafe_allow_html=True)
 
             with st.expander(f"Raw headlines ({result['query_count']})", expanded=False):
-                for h in sorted(result["headlines"],key=lambda x:x["date"],reverse=True)[:40]:
+                for h in sorted(result["headlines"],
+                                key=lambda x: x["date"], reverse=True)[:40]:
+                    glink = (f"https://news.google.com/search?q="
+                             f"{urllib.parse.quote_plus(h['title'][:60])}&hl=en-IN&gl=IN")
+                    actual = h.get("url","")
+                    link   = actual if actual.startswith("http") else glink
                     st.markdown(
-                        f'<div style="font-size:12px;color:#555;padding:2px 0;">'
-                        f'<span style="color:#444;">{h["date"]}</span> &nbsp; {h["title"]}'
+                        f'<div style="font-size:12px;color:#37474f;padding:3px 0;">'
+                        f'<strong style="color:#546e7a;">{h["date"]}</strong>'
+                        f'&nbsp; {h["title"]}'
+                        f'&nbsp;<a href="{link}" target="_blank" '
+                        f'style="color:#263238;font-size:11px;">→</a>'
                         f'</div>', unsafe_allow_html=True)

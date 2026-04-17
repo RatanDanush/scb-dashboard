@@ -22,9 +22,9 @@ import time
 import streamlit as st
 
 CACHE_FILE  = "web_search_cache.json"
-BATCH_SIZE  = 20
-MIN_REFRESH_HOURS   = 12    # don't re-search a client within 12 hours
-BATCH_COOLDOWN_MINS = 25    # don't run two batches within 25 minutes
+BATCH_SIZE  = 100
+MIN_REFRESH_HOURS   = 12
+BATCH_COOLDOWN_MINS = 0.5   # 30 seconds between batches
 
 
 # ─── Cache I/O ───────────────────────────────────────────────────────────────

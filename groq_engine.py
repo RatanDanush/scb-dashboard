@@ -1,14 +1,15 @@
 """
-groq_engine.py
---------------
-Central module for all Groq interactions.
+groq_engine.py  v2
+------------------
+All Groq interactions in one place.
 
-Five functions:
-  1. batch_classify()     — classify headlines (live feed)
-  2. fx_implication()     — one-line FX implication per card
-  3. is_noise()           — filter irrelevant active search results
-  4. web_search_client()  — Groq web search for a specific client
-  5. daily_briefing()     — FX desk summary (replaces groq_summarizer)
+Functions:
+  1. batch_classify()      — classify + INR filter + India-India check
+  2. fx_implication()      — one-line FX implication per card
+  3. is_noise()            — filter irrelevant items
+  4. web_search_client()   — Groq web search for a client
+  5. daily_briefing()      — FX desk summary
+  6. check_inr_relevance() — standalone INR check for a single item
 """
 
 import os, re, json, time
@@ -18,110 +19,138 @@ from dotenv import load_dotenv
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-# ─── Prompts ──────────────────────────────────────────────────────────────────
+
+# ─── Prompts ─────────────────────────────────────────────────────────────────
 
 CLASSIFIER_SYSTEM = """You are a financial news classifier for Standard Chartered Bank India.
-Given headlines, classify each one and return a JSON array.
+You classify headlines and apply strict relevance filters for the FX desk.
 
-For each headline return:
+For each headline return a JSON object with:
 {
   "action_type": "M&A" | "FDI" | "Dividend" | "Buyback" | "Strategic" | "IPO" | "Delisting" | "Restructuring" | "Other",
   "confidence": "high" | "medium" | "low",
   "is_india_relevant": true | false,
+  "inr_involved": true | false,
+  "skip_india_india": true | false,
+  "is_indian_subsidiary_dividend": true | false,
   "foreign_entity": "counterparty name or null",
   "deal_value_usd_m": number or null,
-  "is_significant": true | false
+  "is_significant": true | false,
+  "event_date": "YYYY-MM-DD or YYYY-MM or null"
 }
 
-Rules:
-- M&A: acquisitions, mergers, stake purchases, open offers, demergers
-- FDI: capital infusions, equity raises, greenfield investments, new facilities
-- Dividend: any dividend declaration or repatriation
-- Buyback: share repurchases, open offers by the company itself
-- Strategic: JVs, MoUs, licensing, royalty agreements, partnerships
-- IPO: listings, DRHP filings, delistings
-- is_significant: true only if the event has genuine FX or capital markets implications
-- is_india_relevant: true if it involves an Indian company or India operations
-- Return ONLY a valid JSON array. No other text."""
+CRITICAL RULES — apply these strictly:
 
-FX_IMPLICATION_SYSTEM = """You are an FX salesperson at Standard Chartered Bank.
-Given a corporate action, write EXACTLY ONE sentence (max 30 words) explaining:
-1. The cross-border currency flow this creates
-2. The most relevant SC product
+inr_involved = true ONLY if the transaction creates a cross-border INR flow:
+  - Foreign MNC → Indian company (FDI, acquisition, funding) ✅
+  - Indian company → foreign parent (dividend repatriation, royalty) ✅
+  - Foreign company acquiring Indian company (deal settlement involves INR) ✅
+  - Indian subsidiary funded by foreign parent ECB ✅
+  - Indian conglomerate acquiring using foreign currency bonds ✅
+  - Any cross-border capital flow touching India ✅
+  - Purely domestic Indian deal with no foreign funding or cross-border element ❌
+  - Global deal that only mentions India in passing ❌
 
-Be specific: name the currency pair, direction (INR→USD, EUR→INR etc), and product.
-Infer the parent company's home currency from its name/country.
-Examples of good output:
-- "Maruti dividend repatriation creates INR→JPY flow for Suzuki Japan — FX forward opportunity for FM desk."
-- "ABB India capital raise brings CHF→INR inflow from ABB Switzerland — PrismFX conversion play."
-- "Siemens stake acquisition triggers EUR→INR FDI flow — cross-currency swap to hedge translation exposure."
+skip_india_india = true if:
+  - Both the acquirer AND target are Indian domestic entities
+  - No foreign parent, no ECB, no cross-border funding element
+  - Pure domestic M&A with no FX angle
+  EXCEPTION: keep (skip=false) if Indian company uses foreign currency bonds,
+  ECB proceeds, or foreign parent funding to make the acquisition
 
-Return only the sentence. No preamble."""
+is_indian_subsidiary_dividend = true ONLY if:
+  - The dividend is declared BY an Indian company/subsidiary
+  - The dividend will flow TO a foreign parent (creates INR→foreign currency repatriation)
+  - NOT: a foreign parent declaring dividend to all shareholders
+  - NOT: a global dividend announcement that incidentally includes Indian operations
 
-NOISE_FILTER_SYSTEM = """You are a relevance filter for a financial markets intelligence system at Standard Chartered Bank India.
+event_date: extract the actual date the EVENT occurred (not when reported).
+  Look for phrases like "signed on", "announced on", "effective from", "declared on".
+  If only a month/year is clear, use YYYY-MM format.
 
-Given a news headline and the client it supposedly relates to, answer: is this headline
-genuinely relevant to the client and significant enough to show to an FX salesperson?
+Return ONLY a valid JSON array of objects, one per headline. No other text."""
 
-Return JSON: {"relevant": true|false, "reason": "one short phrase"}
+FX_IMPLICATION_SYSTEM = """You are an FX salesperson at Standard Chartered Bank India.
+Write EXACTLY ONE sentence (max 35 words) on the cross-border FX opportunity.
 
-Mark as NOT relevant if:
-- It's a generic industry article that mentions the company in passing
-- It's about the company's products/services, not corporate structure or finance
-- It's clearly about a different company with a similar name
-- It's older than 12 months
-- It's a press release about awards, CSR, or marketing
+Be specific:
+- Name the exact currency pair (e.g. INR→EUR, USD→INR, JPY→INR)
+- Name the SC product (FX Forward, PrismFX, Cross-Currency Swap, NDF, FX Option)
+- Infer parent currency from company name/country (Siemens=EUR, Maruti/Suzuki=JPY,
+  HUL/Unilever=GBP, Nestle=CHF, ABB=CHF, Bosch=EUR, Hyundai=KRW, Samsung=KRW)
 
-Mark as RELEVANT if:
-- It involves M&A, capital raises, dividends, stake changes, restructuring
-- It involves the foreign parent company and India
-- It involves significant capex, plant setup, or strategic investment
+Good examples:
+"Bosch dividend repatriation creates ₹→EUR flow for Bosch GmbH — FX Forward to lock conversion rate."
+"ABB India capital raise brings CHF→INR inflow from ABB Switzerland — PrismFX for conversion."
+"Siemens stake deal triggers EUR→INR FDI flow — Cross-Currency Swap to hedge translation exposure."
+
+Return ONLY the sentence. No quotes, no preamble."""
+
+NOISE_FILTER_SYSTEM = """You are a relevance filter for Standard Chartered Bank India FX desk.
+Given a headline and the client it relates to, answer: is this relevant?
+
+Return JSON: {"relevant": true|false, "reason": "brief phrase"}
+
+NOT relevant:
+- Generic industry news mentioning company in passing
+- Product launches, awards, CSR, marketing campaigns
+- Operational news with no financial/capital markets angle
+- Clearly about a different company with similar name
+
+RELEVANT:
+- M&A, capital raises, stake changes, dividends, restructuring
+- Foreign parent involvement in India operations
+- Significant capex with cross-border funding
 
 Return ONLY valid JSON."""
 
 WEB_SEARCH_SYSTEM = """You are a corporate intelligence analyst at Standard Chartered Bank India.
-Search for recent corporate actions by the given company.
+Search for recent corporate actions involving the given company.
 
-Focus ONLY on:
-- Acquisitions, mergers, stake sales, open offers
-- Capital raises, FDI, equity infusions, rights issues  
-- Dividends by Indian subsidiary ONLY (list all those only within 3 months)
-- IPOs, delistings, major restructuring
-- Joint ventures, strategic partnerships with financial implications
-- Significant capex announcements (new plants, expansions)
+Focus ONLY on events that create cross-border INR FX flows:
+- Foreign parent investing in / acquiring Indian subsidiary
+- Indian subsidiary paying dividends to foreign parent (repatriation)
+- M&A deals where foreign entity acquires Indian company
+- Capital raises, rights issues, ECB borrowings
+- Large strategic investments with foreign funding component
+- Joint ventures with foreign partners involving capital flows
 
-For each finding return a JSON array:
+SKIP:
+- Pure domestic Indian M&A with no foreign angle
+- Operational news, product launches, hiring
+- Events older than 12 months
+
+Return JSON array (max 8 items):
 [{
-  "date": "MM-YYYY or DD-MM-YYYY",
+  "date": "YYYY-MM-DD or YYYY-MM",
+  "event_date": "actual event date, not report date",
   "action_type": "M&A|FDI|Dividend|Strategic|IPO|Buyback|Other",
   "headline": "clean one-line description",
-  "fx_implication": "one sentence on FX/financial implication for Standard Chartered",
+  "fx_implication": "one sentence — currency pair + SC product",
   "significance": "High|Medium|Low",
-  "deal_value": "e.g. $420M or ₹3,200cr or null",
-  "counterparty": "name of acquirer/target/partner or null"
+  "inr_involved": true|false,
+  "deal_value": "e.g. $420M or ₹3200cr or null",
+  "counterparty": "name or null",
+  "source_url": "article URL if found, else null"
 }]
 
-Rules:
-- Only include events from the last 12 months
-- Only include events with genuine financial markets significance  
-- Maximum 8 events
-- Return ONLY valid JSON array, no other text"""
+Return ONLY valid JSON array. No other text."""
 
 BRIEFING_SYSTEM = """You are a senior financial markets analyst at Standard Chartered Bank.
-Write a concise daily briefing for the FX sales desk based on today's corporate actions.
+Write a concise daily briefing for the FX sales desk.
 
 Rules:
 - Maximum 5 bullet points
-- Each bullet: company name + action + specific FX implication + SC product opportunity
-- Lead with the highest FX-significance event
-- Infer currency pairs from company names (Siemens=EUR, Maruti/Suzuki=JPY, HUL/Unilever=GBP etc)
-- Flag unusually large or one-time events explicitly
-- Mention NIH exposure size where relevant
-- No fluff, no disclaimers, no sign-off
-- Format: • **Company** — action — implication"""
+- Format: • **Company Name** (Parent) — action — FX implication — SC product
+- Infer currency pairs from company names
+- Lead with highest FX-significance event
+- Flag large or unusual events explicitly
+- Mention NIH exposure where >$500M
+- No fluff, no sign-off
+- Only include events with clear INR cross-border angle"""
 
 
-# ─── Groq client helper ───────────────────────────────────────────────────────
+# ─── Groq helpers ────────────────────────────────────────────────────────────
 
 def _client():
     if not GROQ_API_KEY:
@@ -130,8 +159,7 @@ def _client():
     return Groq(api_key=GROQ_API_KEY)
 
 def _call(system: str, user: str, model="llama-3.3-70b-versatile",
-          max_tokens=1000, temperature=0.1) -> str:
-    """Single Groq call — returns content string."""
+          max_tokens=1200, temperature=0.1) -> str:
     c = _client()
     resp = c.chat.completions.create(
         model=model,
@@ -145,60 +173,57 @@ def _call(system: str, user: str, model="llama-3.3-70b-versatile",
     return resp.choices[0].message.content.strip()
 
 def _parse_json(text: str):
-    """Strip markdown fences and parse JSON."""
     text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'\s*```$',          '', text, flags=re.MULTILINE)
     return json.loads(text.strip())
 
 
-# ─── 1. Batch classifier ─────────────────────────────────────────────────────
+# ─── 1. Batch classifier (with all filters) ───────────────────────────────────
 
 @st.cache_data(ttl=3600)
 def batch_classify(headlines_tuple: tuple) -> list:
     """
-    Classify a batch of headlines.
-    Input is a tuple of (headline, summary) pairs — hashable for cache.
-    Returns list of classification dicts, same order as input.
+    Classify headlines AND apply INR filter, India-India skip, dividend filter.
+    Returns list of classification dicts in same order as input.
     """
     if not GROQ_API_KEY or not headlines_tuple:
-        return [_default_classify(h) for h, _ in headlines_tuple]
+        return [_fallback_classify(h) for h, _ in headlines_tuple]
 
     headlines = list(headlines_tuple)
     results   = []
-
-    # Process in chunks of 10
     chunk_size = 10
+
     for i in range(0, len(headlines), chunk_size):
-        chunk = headlines[i:i + chunk_size]
+        chunk    = headlines[i:i + chunk_size]
         numbered = "\n".join(
-            f"{j+1}. HEADLINE: {h}\n   CONTEXT: {s[:100]}"
+            f"{j+1}. HEADLINE: {h}\n   CONTEXT: {s[:120]}"
             for j, (h, s) in enumerate(chunk)
         )
         user_msg = (
-            f"Classify these {len(chunk)} headlines. "
+            f"Classify these {len(chunk)} headlines.\n"
+            f"Apply ALL filters (inr_involved, skip_india_india, is_indian_subsidiary_dividend).\n"
             f"Return a JSON array of exactly {len(chunk)} objects in order:\n\n"
             f"{numbered}"
         )
         try:
-            raw  = _call(CLASSIFIER_SYSTEM, user_msg, max_tokens=800)
+            raw  = _call(CLASSIFIER_SYSTEM, user_msg, max_tokens=1000)
             data = _parse_json(raw)
             if isinstance(data, list) and len(data) == len(chunk):
                 results.extend(data)
             else:
-                results.extend([_default_classify(h) for h, _ in chunk])
+                results.extend([_fallback_classify(h) for h, _ in chunk])
         except Exception as ex:
-            print(f"  Groq classifier error (chunk {i}): {ex}")
-            results.extend([_default_classify(h) for h, _ in chunk])
-
+            print(f"  Classifier error chunk {i}: {ex}")
+            results.extend([_fallback_classify(h) for h, _ in chunk])
         if i + chunk_size < len(headlines):
-            time.sleep(1)   # respect rate limits
+            time.sleep(0.5)
 
     return results
 
-def _default_classify(headline: str) -> dict:
-    """Fallback classification using keywords."""
+def _fallback_classify(headline: str) -> dict:
+    """Keyword-based fallback when Groq unavailable."""
     h = headline.lower()
-    if any(k in h for k in ["acqui","merger","takeover","stake","open offer","divest"]):
+    if any(k in h for k in ["acqui","merger","takeover","stake","divest","open offer"]):
         atype = "M&A"
     elif any(k in h for k in ["dividend","ex-date","record date","repatriat"]):
         atype = "Dividend"
@@ -208,17 +233,21 @@ def _default_classify(headline: str) -> dict:
         atype = "IPO"
     elif any(k in h for k in ["buyback","buy-back","repurchase"]):
         atype = "Buyback"
-    elif any(k in h for k in ["jv","joint venture","mou","partnership","licensing"]):
+    elif any(k in h for k in ["jv","joint venture","mou","partnership"]):
         atype = "Strategic"
     else:
         atype = "Other"
     return {
-        "action_type":      atype,
-        "confidence":       "medium",
-        "is_india_relevant": True,
-        "foreign_entity":   None,
-        "deal_value_usd_m": None,
-        "is_significant":   atype != "Other",
+        "action_type":               atype,
+        "confidence":                "medium",
+        "is_india_relevant":         True,
+        "inr_involved":              True,
+        "skip_india_india":          False,
+        "is_indian_subsidiary_dividend": atype == "Dividend",
+        "foreign_entity":            None,
+        "deal_value_usd_m":          None,
+        "is_significant":            atype != "Other",
+        "event_date":                None,
     }
 
 
@@ -228,23 +257,18 @@ def _default_classify(headline: str) -> dict:
 def fx_implication(headline: str, action_type: str,
                    company: str, mnc_parent: str,
                    amount_str: str, nih_usd_m: float) -> str:
-    """
-    Generate one-sentence FX implication for a card.
-    Only called for high/critical scored actions.
-    """
     if not GROQ_API_KEY:
         return ""
     try:
         user_msg = (
-            f"Corporate action: {action_type}\n"
+            f"Action: {action_type}\n"
             f"Company: {company} (subsidiary of {mnc_parent})\n"
             f"Amount: {amount_str or 'not specified'}\n"
             f"NIH exposure: ${nih_usd_m:,.0f}M\n"
             f"Headline: {headline}\n\n"
             f"Write the FX implication sentence."
         )
-        result = _call(FX_IMPLICATION_SYSTEM, user_msg, max_tokens=60, temperature=0.2)
-        # Clean up — remove quotes if Groq wrapped in them
+        result = _call(FX_IMPLICATION_SYSTEM, user_msg, max_tokens=80, temperature=0.2)
         return result.strip('"').strip("'").strip()
     except Exception as ex:
         print(f"  FX implication error: {ex}")
@@ -255,33 +279,24 @@ def fx_implication(headline: str, action_type: str,
 
 @st.cache_data(ttl=1800)
 def is_noise(headline: str, client_group: str, subsidiary: str) -> bool:
-    """
-    Returns True if the headline should be filtered out.
-    Used on active search results before adding to feed.
-    """
     if not GROQ_API_KEY:
-        return False   # if no key, include everything
+        return False
     try:
         user_msg = (
             f"Client: {subsidiary} (parent: {client_group})\n"
-            f"Headline: {headline}\n\n"
-            f"Is this relevant?"
+            f"Headline: {headline}\n\nIs this relevant?"
         )
         raw  = _call(NOISE_FILTER_SYSTEM, user_msg, max_tokens=60)
         data = _parse_json(raw)
         return not data.get("relevant", True)
     except Exception:
-        return False   # on error, include the item
+        return False
 
 
-# ─── 4. Web search for a client ──────────────────────────────────────────────
+# ─── 4. Web search ───────────────────────────────────────────────────────────
 
 def web_search_client(rec: dict) -> list:
-    """
-    Use Groq web search to find corporate actions for a specific client.
-    Falls back to empty list if web search not available.
-    Returns list of event dicts.
-    """
+    """Groq web search for a specific client. Returns list of event dicts."""
     if not GROQ_API_KEY:
         return []
 
@@ -290,17 +305,13 @@ def web_search_client(rec: dict) -> list:
     exp = rec.get("net_nih_exposure", 0) or 0
 
     user_msg = (
-        f"Company: {sub}\n"
-        f"MNC Parent: {grp}\n"
-        f"NIH Exposure: ${exp:,.0f}M\n\n"
-        f"Search for corporate actions, deals, investments and significant financial events "
-        f"involving {sub} or its parent {grp} in India from the last 12 months. "
-        f"Include M&A deals, capital raises, stake sales, large dividends, IPOs, "
-        f"strategic partnerships. Return as JSON array."
+        f"Company: {sub}\nMNC Parent: {grp}\nNIH Exposure: ${exp:,.0f}M\n\n"
+        f"Search for corporate actions involving {sub} or its parent {grp} in India, "
+        f"last 12 months. Focus on cross-border INR flows only. "
+        f"Return as JSON array."
     )
 
     try:
-        # Try Groq with web search tool
         c = _client()
         resp = c.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -313,14 +324,15 @@ def web_search_client(rec: dict) -> list:
             max_tokens=1500,
         )
 
-        # Extract content from response
+        # Extract text content
         content = ""
-        for block in resp.choices[0].message.content if isinstance(
-                resp.choices[0].message.content, list) else []:
-            if hasattr(block, "text"):
-                content += block.text
-        if not content:
-            content = resp.choices[0].message.content or ""
+        msg = resp.choices[0].message
+        if isinstance(getattr(msg, 'content', None), list):
+            for block in msg.content:
+                if hasattr(block, 'text'):
+                    content += block.text
+        elif isinstance(getattr(msg, 'content', None), str):
+            content = msg.content or ""
 
         if not content.strip():
             return []
@@ -329,30 +341,30 @@ def web_search_client(rec: dict) -> list:
         if not isinstance(events, list):
             return []
 
-        # Normalise to our action dict format
         results = []
         for ev in events:
-            sig = ev.get("significance", "Medium")
+            if not ev.get("inr_involved", True):
+                continue
             results.append({
                 "company_name":   sub[:60],
                 "ticker":         rec.get("ticker"),
                 "action_type":    ev.get("action_type", "Other"),
                 "headline":       ev.get("headline", "")[:200],
-                "date":           str(ev.get("date", ""))[:10] or _today_str(),
-                "amount":         _parse_amount(str(ev.get("deal_value", "") or "")),
+                "date":           str(ev.get("event_date") or ev.get("date",""))[:10],
+                "amount":         _parse_amount(str(ev.get("deal_value","") or "")),
                 "currency":       "USD",
                 "source":         "Groq web search",
-                "raw_detail":     ev.get("fx_implication", "")[:300],
-                "url":            "",
+                "raw_detail":     ev.get("fx_implication","")[:300],
+                "url":            ev.get("source_url","") or "",
                 "foreign_entity": ev.get("counterparty"),
-                "_significance":  sig,
+                "_significance":  ev.get("significance","Medium"),
+                "_inr_involved":  True,
                 "_pre_matched":   rec,
             })
         return results
 
     except Exception as ex:
-        print(f"  Groq web search error for {sub}: {ex}")
-        # Graceful fallback — return empty, active_searcher handles RSS fallback
+        print(f"  Groq web search error {sub[:30]}: {ex}")
         return []
 
 
@@ -360,26 +372,21 @@ def web_search_client(rec: dict) -> list:
 
 @st.cache_data(ttl=1800)
 def daily_briefing(action_snapshot: tuple) -> str:
-    """
-    Generate FX desk briefing from top scored actions.
-    action_snapshot is a hashable tuple for caching.
-    """
     if not GROQ_API_KEY or not action_snapshot:
         return ""
     try:
         lines = []
         for s in action_snapshot:
             score, atype, hl, co, amt, curr, is_client, grp, sub, nih = s
-            client_tag = "SCB CLIENT" if is_client else "non-client"
-            amt_str    = f"₹{amt:.2f}/sh" if amt and curr == "INR" else (
-                         f"${amt:.0f}M" if amt else "")
+            tag    = "SCB CLIENT" if is_client else "non-client"
+            amt_str = (f"₹{amt:.2f}/sh" if amt and curr=="INR"
+                       else f"${amt:.0f}M" if amt else "")
             lines.append(
-                f"[Score {score} | {client_tag}] {atype}: {sub} "
-                f"(parent: {grp}) | NIH: ${nih:,.0f}M | {amt_str} | {hl[:100]}"
+                f"[Score {score}|{tag}] {atype}: {sub} (parent:{grp}) "
+                f"NIH:${nih:,.0f}M {amt_str} — {hl[:100]}"
             )
-
         user_msg = (
-            f"Today's top {len(lines)} corporate actions:\n\n"
+            f"Today's top {len(lines)} corporate actions (INR-relevant only):\n\n"
             + "\n".join(lines)
             + "\n\nWrite the daily FX desk briefing."
         )
@@ -390,49 +397,36 @@ def daily_briefing(action_snapshot: tuple) -> str:
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
-def _today_str() -> str:
-    import datetime
-    return datetime.date.today().isoformat()
-
 def _parse_amount(text: str):
-    """Extract numeric amount from strings like '$420M' or '₹3,200cr'."""
-    import re
-    # Billion
-    m = re.search(r'[\$₹]?\s*([\d,\.]+)\s*(?:bn|billion|B\b)', text, re.I)
+    if not text: return None
+    m = re.search(r'([\d,\.]+)\s*(?:bn|billion)', text, re.I)
     if m:
         try: return float(m.group(1).replace(",","")) * 1000
         except: pass
-    # Million
-    m = re.search(r'[\$₹]?\s*([\d,\.]+)\s*(?:mn|million|M\b|cr)', text, re.I)
+    m = re.search(r'([\d,\.]+)\s*(?:mn|million|M\b|cr)', text, re.I)
     if m:
         try: return float(m.group(1).replace(",",""))
         except: pass
-    # Plain number
     m = re.search(r'[\$₹]\s*([\d,\.]+)', text)
     if m:
         try: return float(m.group(1).replace(",",""))
         except: pass
     return None
 
-
 def make_snapshot(actions: list) -> tuple:
-    """Convert actions to hashable tuple for briefing cache key."""
     top = sorted(
-        [a for a in actions if a.get("_score", 0) >= 50],
+        [a for a in actions if a.get("_score",0) >= 50],
         key=lambda x: x["_score"], reverse=True
     )[:12]
     return tuple(
         (
-            a.get("_score", 0),
-            a.get("action_type", ""),
-            a.get("headline", "")[:100],
-            a.get("company_name", ""),
-            a.get("amount"),
-            a.get("currency"),
-            a.get("is_scb_client", False),
-            (a.get("client") or {}).get("client_group", ""),
-            (a.get("client") or {}).get("indian_subsidiary", ""),
-            (a.get("client") or {}).get("net_nih_exposure", 0) or 0,
+            a.get("_score",0), a.get("action_type",""),
+            a.get("headline","")[:100], a.get("company_name",""),
+            a.get("amount"), a.get("currency"),
+            a.get("is_scb_client",False),
+            (a.get("client") or {}).get("client_group",""),
+            (a.get("client") or {}).get("indian_subsidiary",""),
+            (a.get("client") or {}).get("net_nih_exposure",0) or 0,
         )
         for a in top
     )
