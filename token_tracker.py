@@ -22,14 +22,14 @@ import os
 import datetime
 
 BUDGET_FILE  = "token_budget.json"
-DAILY_BUDGET = 90_000
+DAILY_BUDGET = 100_000
 
 # Per-function allocations
 ALLOCATIONS = {
     "web_search":    65_000,
     "classify":       8_000,
     "fx_implication": 8_000,
-    "briefing":       2_000,
+    "briefing":      12_000,
     "deep_dive":      5_000,
     "buffer":         2_000,
 }

@@ -386,6 +386,40 @@ def fetch_all_corporate_actions(registry: dict) -> tuple:
     except Exception as ex:
         print(f"  Batch cache error: {ex}")
 
+    # Step 1b: Hard dividend cutoff — drop past dividends older than 90 days
+    # Keep: upcoming dividends (future ex-dates) and dividends within 90 days
+    cutoff_90 = datetime.date.today() - datetime.timedelta(days=90)
+    div_before = len(raw)
+    def _keep_dividend(a):
+        if a.get("action_type") not in ("Dividend", "Stock Split"):
+            return True
+        try:
+            d = datetime.date.fromisoformat(str(a.get("date",""))[:10])
+            return d >= cutoff_90   # keep upcoming (future) and recent
+        except Exception:
+            return True
+    raw = [a for a in raw if _keep_dividend(a)]
+    print(f"  Dividend cutoff: removed {div_before - len(raw)} old dividend/split items")
+
+    total_scanned = len(raw)
+
+    # Step 1b: Hard dividend cutoff — drop past dividends older than 90 days
+    # Keep upcoming (future ex-dates) and dividends within last 90 days
+    cutoff_90 = datetime.date.today() - datetime.timedelta(days=90)
+    div_before = len(raw)
+    def _keep_dividend(a):
+        if a.get("action_type") not in ("Dividend", "Stock Split"):
+            return True
+        try:
+            d = datetime.date.fromisoformat(str(a.get("date",""))[:10])
+            return d >= cutoff_90
+        except Exception:
+            return True
+    raw = [a for a in raw if _keep_dividend(a)]
+    print(f"  Dividend cutoff: removed {div_before - len(raw)} old dividend/split items")
+
+    total_scanned = len(raw)
+
     # Step 2: Keyword pre-filter (free, zero tokens)
     pre_len = len(raw)
     raw     = [a for a in raw if pre_filter(a.get("headline",""))]
@@ -500,4 +534,4 @@ def fetch_all_corporate_actions(registry: dict) -> tuple:
     print(f"After dedup: {len(enriched)} unique | {scb} SCB clients")
     print(f"Signal clients: {len(signal_clients)}")
     print(f"{'='*60}\n")
-    return enriched, signal_clients
+    return enriched, signal_clients, total_scanned, total_scanned

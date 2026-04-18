@@ -19,7 +19,7 @@ from datetime import datetime as dt, timedelta
 from streamlit_autorefresh import st_autorefresh
 
 from client_registry import load_registry
-from corporate_fetcher import fetch_all_corporate_actions, LOOKBACK_DAYS, LOOKAHEAD_DAYS
+from corporate_fetcher import fetch_all_corporate_actions
 from groq_engine import fx_implication, daily_briefing, make_snapshot, GROQ_API_KEY
 from batch_manager import run_next_batch, get_progress, load_cache
 from deep_dive import run_deep_dive
@@ -508,15 +508,20 @@ tab_live, tab_dive = st.tabs(["📡  Live Monitor", "🔍  Client Deep Dive"])
 # ═══════════════════════════════════════════════════════════════════════════
 with tab_live:
 
-    # Stats row + token tracker top-right
-    c1,c2,c3,c4 = st.columns([2,2,2,2])
-    with c1: st.metric("Monitored", len(registry["all"]))
-    with c2: st.metric("Tickers",   len(registry["by_ticker"]))
-    with c3: st.metric("Window",
-        f"–{LOOKBACK_DAYS}d / +{LOOKAHEAD_DAYS}d",
-        f"{(dt.now()-timedelta(days=LOOKBACK_DAYS)).strftime('%d %b')} → "
-        f"{(dt.now()+timedelta(days=LOOKAHEAD_DAYS)).strftime('%d %b')}")
-    with c4:
+    # Stats row
+    c1, c2, c3 = st.columns([1, 1, 1])
+    with c1:
+        st.metric("News Scanned", total_scanned)
+    with c2:
+        try:
+            from batch_manager import load_cache
+            _cache = load_cache()
+            deep_scans = sum(1 for k, v in _cache.items()
+                             if k != "_meta" and v.get("last_searched"))
+        except Exception:
+            deep_scans = 0
+        st.metric("Deep Scans Today", deep_scans)
+    with c3:
         tok     = get_token_status()
         used    = tok["total_used"]
         budget  = tok["total_budget"]
@@ -527,7 +532,7 @@ with tab_live:
         bar_col = "#d32f2f" if at_lim else ("#BA7517" if pct > 70 else "#1D9E75")
         limit_warn = '<div style="font-size:10px;color:#d32f2f;font-weight:600;">⚠ Token limit reached — web search paused</div>' if at_lim else ""
         st.markdown(
-            f'<div style="text-align:right;padding-top:2px;">'
+            f'<div style="padding-top:2px;">'
             f'<div style="font-size:11px;color:#546e7a;">Groq tokens today</div>'
             f'<div style="font-size:15px;font-weight:500;color:{bar_col};">'
             f'{used:,} <span style="font-size:11px;color:#37474f;">/ {budget:,}</span></div>'
@@ -549,7 +554,7 @@ with tab_live:
 
     # ── Fetch main feed FIRST (user sees dashboard immediately) ───────────────
     with st.spinner("Scanning sources..."):
-        raw, signal_clients = fetch_all_corporate_actions(registry)
+        raw, signal_clients, total_scanned = fetch_all_corporate_actions(registry)
 
     for a in raw:
         a["_score"]   = score_action(a)

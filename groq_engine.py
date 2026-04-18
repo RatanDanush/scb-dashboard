@@ -102,6 +102,24 @@ is_primary_subject = false AND is_significant = false if:
     NOT Novartis. Mark is_primary_subject = false for Novartis match.
   - Example: "Wall Street gains; PepsiCo rises, Abbott falls 4%" → primary subject
     is market commentary, not Abbott India
+  - CRITICAL EXAMPLE: "Goldman Sachs cuts Siemens Energy voting stake to below 5%"
+    → primary subject = Goldman Sachs (institutional investor reducing equity position)
+    → Siemens Energy / Siemens India is the OBJECT, not the actor
+    → inr_involved = false (on-market equity trade, no cross-border INR flow)
+    → is_primary_subject = false, is_significant = false
+  - Generalised rule: if [third party] [cuts/reduces/trims/sells/raises]
+    [matched company] stake/shares/holding → always is_primary_subject = false,
+    inr_involved = false UNLESS the matched company is explicitly an Indian subsidiary
+    selling its own shares or announcing a buyback
+  - CRITICAL EXAMPLE: "Goldman Sachs cuts Siemens Energy voting stake to below 5%"
+    → primary subject = Goldman Sachs (institutional investor reducing equity position)
+    → Siemens Energy / Siemens India is the OBJECT, not the actor
+    → inr_involved = false (on-market equity trade, no cross-border INR flow)
+    → is_primary_subject = false, is_significant = false
+  - Generalised rule: if [third party institution] [cuts/reduces/trims/sells/raises]
+    [matched company] stake/shares/holding → always is_primary_subject = false,
+    inr_involved = false UNLESS the matched company is explicitly an Indian subsidiary
+    selling its own shares or announcing a buyback
 
 ═══ FILTER 7: SEBI OPEN OFFER TRIGGER ═══
 sebi_open_offer_trigger = true if:

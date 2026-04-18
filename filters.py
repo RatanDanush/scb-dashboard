@@ -92,6 +92,63 @@ def is_market_commentary(headline: str) -> bool:
         return True
     return False
 
+def is_object_in_stake_action(headline: str, client_name: str) -> bool:
+    """
+    Returns True if the matched company is the OBJECT of a stake action,
+    not the subject — i.e. someone else is acting on the company's shares.
+
+    Keep  (subject): "Siemens cuts stake in Innomotics"
+    Filter (object): "Goldman Sachs cuts Siemens Energy stake"
+
+    Safety rule: if company name appears BEFORE the verb, it's the actor → keep.
+    Safety rule: if both company and a parent/related name appear, default keep.
+    """
+    import re
+    h    = headline.lower()
+    name = client_name.lower()
+    for w in ["group", "corporation", "holdings", "plc", "ag", "sa", "inc",
+              "ltd", "limited", "india", "pvt", "private"]:
+        name = re.sub(r'\b' + re.escape(w) + r'\b', '', name).strip()
+    name = re.sub(r'\s+', ' ', name).strip()
+    if not name or len(name) < 4:
+        return False
+    if name not in h:
+        return False
+
+    STAKE_VERBS = (
+        r"cuts?|reduces?|trims?|sells?|offloads?|divests?|exits?|"
+        r"raises?|increases?|lifts?|boosts?|buys?|acquires?|adds?"
+    )
+    # Pattern: [anything] [verb] [company] [stake/shares/holding/interest]
+    # This means company is the object
+    obj_pattern = re.compile(
+        rf".+?\b({STAKE_VERBS})\b.{{0,40}}{re.escape(name)}.{{0,30}}"
+        rf"\b(stake|shares?|holding|interest|position|equity)\b",
+        re.IGNORECASE,
+    )
+    # Pattern: [company] [verb] — company is the subject
+    subj_pattern = re.compile(
+        rf"^{re.escape(name)}\b.{{0,60}}\b({STAKE_VERBS})\b",
+        re.IGNORECASE,
+    )
+
+    if subj_pattern.match(h):
+        return False   # company is the actor — keep
+
+    if obj_pattern.search(h):
+        # Safety: if company name appears before the first stake verb, it's
+        # probably the subject in a different clause — default keep
+        first_verb_match = re.search(rf"\b({STAKE_VERBS})\b", h)
+        if first_verb_match:
+            name_pos = h.find(name)
+            verb_pos = first_verb_match.start()
+            if name_pos < verb_pos:
+                return False  # name before verb → subject → keep
+        return True   # company is the object → filter
+
+    return False
+
+
 def is_secondary_reference(headline: str, client_name: str) -> bool:
     """True if client appears as secondary reference in the headline."""
     h    = headline.lower()
@@ -107,7 +164,12 @@ def is_secondary_reference(headline: str, client_name: str) -> bool:
         f"former {name}", f"ex-{name}",
         f"{name} board member", f"board of ",
     ]
-    return any(p in h for p in patterns)
+    if any(p in h for p in patterns):
+        return True
+    # Stake-action object detection
+    if is_object_in_stake_action(headline, client_name):
+        return True
+    return False
 
 def pre_filter(headline: str) -> bool:
     """
