@@ -507,7 +507,9 @@ tab_live, tab_dive = st.tabs(["📡  Live Monitor", "🔍  Client Deep Dive"])
 # TAB 1 — LIVE MONITOR
 # ═══════════════════════════════════════════════════════════════════════════
 with tab_live:
-
+  # ── Fetch main feed FIRST (user sees dashboard immediately) ───────────────
+    with st.spinner("Scanning sources..."):
+        raw, signal_clients, total_scanned = fetch_all_corporate_actions(registry)
     # Stats row
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
@@ -551,10 +553,6 @@ with tab_live:
             st.rerun()
 
     st.divider()
-
-    # ── Fetch main feed FIRST (user sees dashboard immediately) ───────────────
-    with st.spinner("Scanning sources..."):
-        raw, signal_clients, total_scanned = fetch_all_corporate_actions(registry)
 
     for a in raw:
         a["_score"]   = score_action(a)
