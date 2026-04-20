@@ -661,6 +661,7 @@ with tab_live:
     )
 
     # Main columns
+    prog = get_progress(registry, load_cache())
     col_feed, col_right = st.columns([3,1], gap="large")
 
     with col_feed:
