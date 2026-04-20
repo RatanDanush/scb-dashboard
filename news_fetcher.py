@@ -29,7 +29,7 @@ def fetch_rss_feeds() -> list:
         try:
             feed = feedparser.parse(feed_config["url"])
 
-            for entry in feed.entries[:10]:   # max 10 per source
+            for entry in feed.entries[:25]:   # max 25 per source
                 # Clean up the summary — remove HTML tags crudely
                 raw_summary = entry.get("summary", "")
                 clean_summary = raw_summary.replace("<b>", "").replace("</b>", "") \

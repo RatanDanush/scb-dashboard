@@ -107,7 +107,7 @@ def _gnews(query: str) -> list:
     try:
         resp = requests.get(url, headers=HDR, timeout=12)
         feed = feedparser.parse(resp.content)
-        for e in feed.entries[:15]:
+        for e in feed.entries[:20]:
             title   = e.get("title", "")
             summary = e.get("summary", "")
             date_str = _parse_pub(e)
@@ -139,13 +139,14 @@ def _search_one_client(rec: dict) -> list:
     if len(sub_q) > 4:
         queries.append(f'"{sub_q}" acquisition OR merger OR deal OR investment')
         queries.append(f'"{sub_q}" stake OR IPO OR JV OR expansion')
+        queries.append(f'"{sub_q}" India 2025 OR 2026')
     if len(grp_q) > 4:
         queries.append(f'"{grp_q}" India acquisition OR investment OR expansion 2025 OR 2026')
 
     seen    = set()
     actions = []
 
-    for q in queries[:3]:
+    for q in queries[:4]:
         for item in _gnews(q):
             key = item["title"][:60].lower()
             if key in seen:
@@ -156,7 +157,7 @@ def _search_one_client(rec: dict) -> list:
             atype    = _classify(combined)
 
             # NSE RSS handles dividends — skip them here to avoid duplicates
-            if atype in ("Dividend", "Other"):
+            if atype == "Dividend":
                 continue
 
             actions.append({
@@ -198,7 +199,7 @@ def fetch_active_search(tier1_keys: tuple, tier2_keys: tuple,
 
     all_actions = []
     searched    = 0
-    all_keys    = list(tier1_keys) + list(tier2_keys[:30])
+    all_keys    = list(tier1_keys) + list(tier2_keys[:50])
 
     for key in all_keys:
         rec = by_key.get(key)
