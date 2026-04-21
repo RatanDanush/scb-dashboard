@@ -53,7 +53,6 @@ MARKET_COMMENTARY_PHRASES = [
     "promoted to cfo", "promoted to ceo",
     "annual report", "fy2025 annual report", "fy2026 annual report",
     "strong performance marks milestone",
-]
     "raises prices on select plans", "cuts benefits and raises prices",
     "new plans rolled out", "plan prices", "price hike on plans",
     "service tariff", "prepaid plans", "postpaid plans",
