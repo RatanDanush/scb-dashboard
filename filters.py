@@ -34,6 +34,22 @@ MARKET_COMMENTARY_PHRASES = [
     # Technical analysis
     "support level", "resistance level", "rsi", "moving average",
     "52-week high", "52-week low", "market cap",
+    # ── Stock pick / investment list articles (Issue 5 — Honeywell) ──────────
+    "stocks to invest", "stocks to buy", "stocks to watch",
+    "high-priced stocks", "best stocks", "top stocks",
+    "stocks in india in", "stocks for", "stocks to consider",
+    "shares to buy", "shares to watch",
+    # ── Smart investing / retail investor content (Issue 8) ──────────────────
+    "what you need to know for smart investing",
+    "smart investing", "stock: what you need to know",
+    "invest in india in april", "invest in india in",
+    "investing now", "for smart investing",
+    # ── Telecom / service pricing — NOT capital flows (Issue 4 — Vodafone) ───
+    "tariff hike", "tariff revision", "telecom tariff",
+    "raises prices on select plans", "cuts benefits and raises prices",
+    "new plans rolled out", "plan prices", "price hike on plans",
+    "service tariff", "prepaid plans", "postpaid plans",
+    "broadband prices", "data plan",
 ]
 
 # ─── Aggregator / list articles ───────────────────────────────────────────────

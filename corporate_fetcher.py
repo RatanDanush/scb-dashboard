@@ -503,7 +503,7 @@ def fetch_all_corporate_actions(registry: dict) -> tuple:
                 a.pop("_pre_matched", None)
         enriched.append(a)
 
-    enriched.sort(key=lambda x: x["date"], reverse=True)
+    enriched.sort(key=lambda x: x.get("date") or "", reverse=True)
 
     # Extract signal clients for batch priority
     signal_clients = set()

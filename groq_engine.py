@@ -61,6 +61,14 @@ inr_involved = true ONLY if the transaction creates a real cross-border INR flow
   ❌ Global divestiture where Indian subsidiary is not a named party → FALSE
      (e.g. Nestlé sells global water brands → Nestlé India doesn't own water brands → FALSE)
   ❌ Any deal where both acquirer and target are outside India → FALSE
+  ❌ EXPLICIT EXAMPLE: "Whirlpool Plans $60M Investment at Ohio Facility" →
+     Ohio is in the USA, NOT India → inr_involved = FALSE
+  ❌ EXPLICIT EXAMPLE: "Mercedes investing $4B in Alabama plant" →
+     Alabama is in the USA → inr_involved = FALSE
+  ❌ EXPLICIT EXAMPLE: "Company X invests in European / US / Chinese / UAE facility" →
+     Any non-India geography → inr_involved = FALSE, even if Company X has an Indian arm
+  ❌ GENERAL RULE: If the investment destination country is NOT India, inr_involved = FALSE.
+     The existence of an Indian subsidiary of the parent does NOT change this.
 
 ═══ FILTER 2: INDIA-INDIA SKIP ═══
 skip_india_india = true if:
@@ -92,6 +100,13 @@ is_significant = false AND action_type = "Other" if:
   - Post-IPO stock performance: "stock falls", "trades below issue price"
   - General market roundups mentioning company incidentally
   - "Share price live", "stock performance", "market cap update"
+  - Stock pick / investment list articles: "Top N stocks to invest", "High-priced stocks",
+    "Best stocks in India", "Stocks to watch/buy/consider" — these are retail investor
+    content, NOT corporate actions. Mark inr_involved = false.
+  - Telecom / utility service pricing: tariff hikes, plan revisions, price increases
+    on consumer plans — these are operational revenue decisions, NOT capital flows.
+    Example: "Vodafone Idea Cuts Benefits and Raises Prices on Select Plans" →
+    action_type = "Other", inr_involved = false, is_significant = false
 
 ═══ FILTER 6: CLIENT AS SECONDARY REFERENCE ═══
 is_primary_subject = false AND is_significant = false if:
@@ -272,7 +287,7 @@ def batch_classify(headlines_tuple: tuple) -> list:
 
     headlines = list(headlines_tuple)
     results   = []
-    chunk_size = 10
+    chunk_size = 5   # smaller batches → more accurate INR reasoning per headline
 
     for i in range(0, len(headlines), chunk_size):
         chunk    = headlines[i:i + chunk_size]

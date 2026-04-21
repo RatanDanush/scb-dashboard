@@ -729,10 +729,11 @@ with tab_live:
         st.divider()
         st.markdown("**Web search**")
         st.progress(prog["pct"] / 100)
+        remaining_clients = prog["total"] - prog["fresh_24h"]
         st.markdown(
             f'<div style="font-size:11px;color:#546e7a;">'
-            f'{prog["fresh_24h"]}/{prog["total"]} clients (24h)<br>'
-            f'{prog["batches_left"]} batches left<br>'
+            f'{prog["fresh_24h"]}/{prog["total"]} clients searched (24h)<br>'
+            f'{remaining_clients} clients remaining<br>'
             f'Next in {prog["next_in_mins"]}m</div>',
             unsafe_allow_html=True)
 
@@ -896,14 +897,16 @@ with tab_dive:
 
                 st.divider()
                 for ev in result["events"]:
-                    sig = ev.get("significance","Low")
-                    css = {"High":"dd-high","Medium":"dd-medium","Low":"dd-low"}[sig]
-                    sc  = {"High":"#ef5350","Medium":"#ff6d00","Low":"#555"}[sig]
+                    sig = (ev.get("significance") or "Low").strip().capitalize()
+                    if sig not in ("High","Medium","Low"):
+                        sig = "Low"
+                    css = {"High":"dd-high","Medium":"dd-medium","Low":"dd-low"}.get(sig,"dd-low")
+                    sc  = {"High":"#ef5350","Medium":"#ff6d00","Low":"#555"}.get(sig,"#555")
                     ev_link = ev.get("source_url","") or (
                         f"https://news.google.com/search?q="
                         f"{urllib.parse.quote_plus(ev.get('headline','')[:60])}"
                         f"&hl=en-IN&gl=IN")
-                    nice_d, rel_d = format_date(ev.get("date","")[:10])
+                    nice_d, rel_d = format_date((ev.get("date") or "")[:10])
                     st.markdown(f"""
                     <div class="dd-event {css}">
                       <div style="font-size:13px;color:{sc};margin-bottom:2px;">
@@ -934,7 +937,7 @@ with tab_dive:
 
             with st.expander(f"Raw headlines ({result['query_count']})", expanded=False):
                 for h in sorted(result["headlines"],
-                                key=lambda x: x["date"], reverse=True)[:40]:
+                                key=lambda x: x.get("date",""), reverse=True)[:40]:
                     glink = (f"https://news.google.com/search?q="
                              f"{urllib.parse.quote_plus(h['title'][:60])}&hl=en-IN&gl=IN")
                     actual = h.get("url","")
