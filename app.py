@@ -184,14 +184,14 @@ def score_action(a):
     if a.get("_sebi_open_offer"):
         total += 15
 
-    # Penalty: M&A from news source with no India keyword in headline
-    # Secondary safety net on top of Groq filter
-    if atype == "M&A" and "google" in source.lower():
+    # Penalty: M&A or FDI from Google News with no India keyword in headline
+    # Catches: Whirlpool Ohio, Mercedes Alabama, etc.
+    if atype in ("M&A", "FDI") and "google" in source.lower():
         headline_lower = a.get("headline","").lower()
         if not any(w in headline_lower for w in
                    ["india","indian","nse","bse","mumbai","delhi","bengaluru",
-                    "hyderabad","pune","chennai","open offer","sebi"]):
-            total -= 20
+                    "hyderabad","pune","chennai","open offer","sebi","inr"]):
+            total -= 30
 
     # Recency scoring
     try:
@@ -207,15 +207,30 @@ def score_action(a):
             total -= 15
         elif delta > 180:
             total -= 10
+        # Hard cap: events older than 30 days cannot reach critical tier
+        if delta > 30:
+            total = min(total, 79)
     except Exception:
         pass
+
+    # Upcoming dividend ex-date boost (Issue 7 — Huhtamaki)
+    # Ex-date within 5 days is time-sensitive — push to top
+    if atype in ("Dividend","Dividend_Special"):
+        try:
+            ev = a.get("_event_date") or a.get("date","")
+            ev_delta = (datetime.date.fromisoformat(str(ev)[:10]) -
+                        datetime.date.today()).days
+            if -1 <= ev_delta <= 5:   total += 20  # ex-date imminent
+            elif ev_delta <= 14:      total += 10  # ex-date within 2 weeks
+        except Exception:
+            pass
 
     return max(0, total)   # floor at 0
 
 def urgency(score):
-    if score >= 70: return "critical"
-    if score >= 50: return "high"
-    if score >= 35: return "medium"
+    if score >= 80: return "critical"   # raised from 70 — reduces false critical count
+    if score >= 58: return "high"       # raised from 50
+    if score >= 40: return "medium"     # raised from 35
     return "low"
 
 MINIMUM_SCORE  = 25
@@ -427,9 +442,19 @@ def render_group(group: dict):
         if impl:
             fx_html = f'<div class="fx-line">FX → {impl}</div>'
 
-    # Sub-events HTML
+    # Sub-events HTML — cap to 1 per action_type to keep cards compact
     sub_html = ""
+    seen_types = set()
+    capped_others = []
     for o in others:
+        ot = o.get("action_type","Other")
+        if ot not in seen_types:
+            seen_types.add(ot)
+            capped_others.append(o)
+
+    others_label = f" +{len(others)} more" if others else ""
+
+    for o in capped_others:
         o_nice, o_rel = format_date(o.get("date",""))
         o_link = source_link(o)
         sub_html += f"""
@@ -555,6 +580,12 @@ with tab_live:
     st.divider()
 
     for a in raw:
+        # Hard drop: Groq-marked non-significant "Other" items (stock picks, market commentary)
+        if (a.get("action_type","") == "Other" and
+                a.get("_groq_significant") is False):
+            a["_score"]   = 0
+            a["_urgency"] = "low"
+            continue
         a["_score"]   = score_action(a)
         a["_urgency"] = urgency(a["_score"])
 
@@ -669,8 +700,34 @@ with tab_live:
             st.info("No actions match filters. Try adjusting or refreshing.")
         else:
             groups = group_by_mnc(filtered)
-            for grp in groups[:50]:
-                render_group(grp)
+            div_groups     = [g for g in groups[:50]
+                              if g["lead"]["action_type"] in
+                              ("Dividend","Dividend_Special","Stock Split","Buyback")]
+            non_div_groups = [g for g in groups[:50]
+                              if g["lead"]["action_type"] not in
+                              ("Dividend","Dividend_Special","Stock Split","Buyback")]
+
+            col_main, col_div = st.columns([3, 2], gap="medium")
+            with col_main:
+                st.markdown(
+                    '<div style="font-size:12px;font-weight:600;color:#546e7a;'
+                    'letter-spacing:.05em;margin-bottom:8px;">M&A · FDI · STRATEGIC</div>',
+                    unsafe_allow_html=True)
+                if non_div_groups:
+                    for grp in non_div_groups:
+                        render_group(grp)
+                else:
+                    st.caption("No M&A / FDI / Strategic actions.")
+            with col_div:
+                st.markdown(
+                    '<div style="font-size:12px;font-weight:600;color:#546e7a;'
+                    'letter-spacing:.05em;margin-bottom:8px;">DIVIDENDS · CORPORATE EVENTS</div>',
+                    unsafe_allow_html=True)
+                if div_groups:
+                    for grp in div_groups:
+                        render_group(grp)
+                else:
+                    st.caption("No dividend events.")
 
         # Non-client box
         if non_client_actions:
