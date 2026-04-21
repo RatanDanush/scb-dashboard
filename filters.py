@@ -44,8 +44,16 @@ MARKET_COMMENTARY_PHRASES = [
     "smart investing", "stock: what you need to know",
     "invest in india in april", "invest in india in",
     "investing now", "for smart investing",
-    # ── Telecom / service pricing — NOT capital flows (Issue 4 — Vodafone) ───
-    "tariff hike", "tariff revision", "telecom tariff",
+    # ── Executive appointments / HR news — NOT capital flows ─────────────────
+    "extends tenure", "extend his tenure", "extend her tenure",
+    "cfo extends", "ceo extends", "md extends", "director extends",
+    "appoints cfo", "appoints ceo", "appoints md", "names new cfo",
+    "names new ceo", "new managing director", "new chief financial",
+    "new chief executive", "joins as cfo", "joins as ceo",
+    "promoted to cfo", "promoted to ceo",
+    "annual report", "fy2025 annual report", "fy2026 annual report",
+    "strong performance marks milestone",
+]
     "raises prices on select plans", "cuts benefits and raises prices",
     "new plans rolled out", "plan prices", "price hike on plans",
     "service tariff", "prepaid plans", "postpaid plans",

@@ -87,6 +87,14 @@ st.markdown("""
   .unver-badge{background:#1a1a10;border:1px solid #444;color:#777;
     padding:1px 7px;border-radius:999px;font-size:10px;font-style:italic;}
 
+  /* Groq verification badges */
+  .groq-verified{background:#0d2318;border:1px solid #2e7d32;color:#66bb6a;
+    padding:1px 8px;border-radius:999px;font-size:10px;font-weight:600;}
+  .groq-low{background:#1a1205;border:1px solid #5d4037;color:#a1887f;
+    padding:1px 8px;border-radius:999px;font-size:10px;}
+  .groq-pending{background:#111;border:1px solid #263238;color:#37474f;
+    padding:1px 8px;border-radius:999px;font-size:10px;}
+
   /* Date — large and prominent */
   .event-date{font-size:15px;font-weight:600;color:#90a4ae;letter-spacing:.03em;
     margin-bottom:4px;}
@@ -417,7 +425,18 @@ def render_group(group: dict):
 
     # New badge
     new_html  = '<span class="new-badge">NEW</span> ' if new_flag else ""
-    unver_html = '<span class="unver-badge">unverified</span> ' if low_conf else ""
+
+    # Groq verification badge — 3 states
+    conf = lead.get("_groq_confidence")
+    inr  = lead.get("_inr_involved")
+    if conf in ("high", "medium") and inr is True:
+        groq_html = '<span class="groq-verified">✓ INR verified</span> '
+    elif conf == "low":
+        groq_html = '<span class="groq-low">⚠ low confidence</span> '
+    elif conf is None:
+        groq_html = '<span class="groq-pending">○ pending scan</span> '
+    else:
+        groq_html = '<span class="groq-low">⚠ unverified</span> '
 
     # Source link
     link = source_link(lead)
@@ -485,7 +504,7 @@ def render_group(group: dict):
         <div class="urgency-{u}">
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
             {urgency_pill(score)} {action_pill(lead)}
-            {cl_badge} {sc_chip(score)} {new_html}{unver_html}
+            {cl_badge} {sc_chip(score)} {new_html}{groq_html}
           </div>
 
           <div class="event-date">
@@ -536,7 +555,7 @@ with tab_live:
     with st.spinner("Scanning sources..."):
         raw, signal_clients, total_scanned = fetch_all_corporate_actions(registry)
     # Stats row
-    c1, c2, c3 = st.columns([1, 1, 1])
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
     with c1:
         st.metric("News Scanned", total_scanned)
     with c2:
@@ -549,6 +568,11 @@ with tab_live:
             deep_scans = 0
         st.metric("Deep Scans Today", deep_scans)
     with c3:
+        prog_early = get_progress(registry, load_cache())
+        remaining_early = prog_early["total"] - prog_early["fresh_24h"]
+        st.metric("Groq Scanned", f'{prog_early["fresh_24h"]}/{prog_early["total"]}',
+                  delta=f'{remaining_early} remaining', delta_color="off")
+    with c4:
         tok     = get_token_status()
         used    = tok["total_used"]
         budget  = tok["total_budget"]
@@ -580,7 +604,15 @@ with tab_live:
     st.divider()
 
     for a in raw:
-        # Hard drop: Groq-marked non-significant "Other" items (stock picks, market commentary)
+        # Hard drop: Groq-marked non-significant items with no INR flow
+        # Covers any action_type — catches mis-classified executive news,
+        # stock commentary etc. that Groq correctly sees through
+        if (a.get("_groq_significant") is False and
+                a.get("_inr_involved") is False):
+            a["_score"]   = 0
+            a["_urgency"] = "low"
+            continue
+        # Also drop plain "Other" with no significance flag
         if (a.get("action_type","") == "Other" and
                 a.get("_groq_significant") is False):
             a["_score"]   = 0
@@ -691,10 +723,10 @@ with tab_live:
         f"{sum(1 for a in filtered if is_new(a))} new this week"
     )
 
-    # Main columns
-    prog = get_progress(registry, load_cache())
-    col_feed, col_right = st.columns([3,1], gap="large")
+    # Main layout — full width, no sidebar
+    prog = prog_early   # already fetched above
 
+    col_feed = st.container()
     with col_feed:
         if not filtered:
             st.info("No actions match filters. Try adjusting or refreshing.")
@@ -768,67 +800,6 @@ with tab_live:
                     </div>
                     """, unsafe_allow_html=True)
                 st.markdown('</div>', unsafe_allow_html=True)
-
-    with col_right:
-        st.markdown("**Urgency breakdown**")
-        for lbl, grp_list, col in [
-            ("Critical (70+)", critical, "#ef5350"),
-            ("High (50–69)",   high,     "#ff6d00"),
-            ("Medium (35–49)", medium,   "#0288d1"),
-            ("Low (25–34)",    low,      "#444"),
-        ]:
-            if grp_list:
-                st.markdown(
-                    f'<div style="font-size:12px;color:#90a4ae;margin:3px 0;">'
-                    f'{lbl} <strong style="color:{col};">{len(grp_list)}</strong></div>',
-                    unsafe_allow_html=True)
-
-        st.divider()
-        st.markdown("**Web search**")
-        st.progress(prog["pct"] / 100)
-        remaining_clients = prog["total"] - prog["fresh_24h"]
-        st.markdown(
-            f'<div style="font-size:11px;color:#546e7a;">'
-            f'{prog["fresh_24h"]}/{prog["total"]} clients searched (24h)<br>'
-            f'{remaining_clients} clients remaining<br>'
-            f'Next in {prog["next_in_mins"]}m</div>',
-            unsafe_allow_html=True)
-
-        st.divider()
-        st.markdown("**Client highlights**")
-        shown_mncs = set()
-        for a in filtered[:10]:
-            c  = a.get("client") or {}
-            mn = c.get("client_group","")
-            if mn in shown_mncs: continue
-            shown_mncs.add(mn)
-            uc = {"critical":"#ef5350","high":"#ff6d00",
-                  "medium":"#0288d1","low":"#444"}[a["_urgency"]]
-            st.markdown(f"""
-            <div style="border:1px solid #1e3a5f;border-left:3px solid {uc};
-                        border-radius:6px;padding:8px 10px;margin-bottom:5px;">
-              <div style="font-size:11px;font-weight:600;color:#64b5f6;">{mn}</div>
-              <div style="font-size:11px;color:#90a4ae;">{c.get('indian_subsidiary','')[:35]}</div>
-              <div style="margin-top:4px;display:flex;gap:5px;align-items:center;">
-                {action_pill(a)}
-                <span style="font-size:10px;color:{uc};font-weight:600;">{a['_score']}</span>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        st.divider()
-        st.markdown("**By type**")
-        tc = {}
-        for a in filtered:
-            k = ("Special div."
-                 if a["action_type"]=="Dividend" and is_special_div(a)
-                 else a["action_type"])
-            tc[k] = tc.get(k,0)+1
-        for k,v in sorted(tc.items(),key=lambda x:-x[1]):
-            st.markdown(
-                f'<div style="font-size:12px;color:#78909c;margin:2px 0;">'
-                f'{k} <strong style="color:#eceff1;">{v}</strong></div>',
-                unsafe_allow_html=True)
 
     # Data table
     st.divider()
