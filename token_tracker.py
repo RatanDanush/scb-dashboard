@@ -1,17 +1,15 @@
 """
 token_tracker.py
 ----------------
-Tracks daily Groq token consumption against a 90,000 token/day budget.
+Tracks daily Groq token consumption against a 100,000 token/day budget.
 
-Budget allocation:
-  Web search:      65,000  (signal-triggered + tier fill)
-  Classification:   8,000  (8b model, ~50 tokens/item)
-  FX implications:  8,000  (70b model, ~150 tokens/item)
-  Daily briefing:   2,000
-  Deep dive:        5,000
-  Buffer:           2,000
+Budget allocation (updated — briefing removed):
+  Web search:      79,000  (signal-triggered + tier fill — ~65 clients/day)
+  Classification:   8,000  (8b model, ~50 tokens/item, ~160 headlines/day)
+  FX implications:  8,000  (70b model, ~250 tokens/call, ~32 cards/day)
+  Deep dive:        5,000  (manual only — on-demand client history)
   ─────────────────────
-  Total:           90,000
+  Total:          100,000
 
 Resets at midnight UTC (= 5:30am IST).
 Stored in token_budget.json on disk.
@@ -26,12 +24,10 @@ DAILY_BUDGET = 100_000
 
 # Per-function allocations
 ALLOCATIONS = {
-    "web_search":    65_000,
+    "web_search":    79_000,   # was 65k — briefing 12k + buffer 2k reallocated here
     "classify":       8_000,
     "fx_implication": 8_000,
-    "briefing":      12_000,
     "deep_dive":      5_000,
-    "buffer":         2_000,
 }
 
 

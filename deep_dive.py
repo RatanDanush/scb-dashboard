@@ -161,6 +161,12 @@ def _groq_extract(headlines: list, client_group: str,
 
     try:
         from groq import Groq
+        from token_tracker import can_afford, record_usage
+
+        if not can_afford("deep_dive", 2500):
+            print("  Deep dive: token budget exhausted, skipping Groq extraction")
+            return []
+
         client = Groq(api_key=GROQ_API_KEY)
 
         # Build headline list for Groq
@@ -184,6 +190,11 @@ def _groq_extract(headlines: list, client_group: str,
             temperature=0.1,
             max_tokens=2000,
         )
+
+        # Record actual usage
+        actual = getattr(resp, "usage", None)
+        used   = actual.total_tokens if actual else 2500
+        record_usage("deep_dive", used)
 
         raw = resp.choices[0].message.content.strip()
         # Strip markdown code fences if present

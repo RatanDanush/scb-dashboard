@@ -20,7 +20,7 @@ from streamlit_autorefresh import st_autorefresh
 
 from client_registry import load_registry
 from corporate_fetcher import fetch_all_corporate_actions
-from groq_engine import fx_implication, daily_briefing, make_snapshot, GROQ_API_KEY
+from groq_engine import fx_implication, GROQ_API_KEY
 from batch_manager import run_next_batch, get_progress, load_cache
 from deep_dive import run_deep_dive
 from token_tracker import get_status as get_token_status
@@ -36,114 +36,90 @@ st_autorefresh(interval=30 * 60 * 1000, key="corp_refresh")
 # ─── Styling ─────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-  .hdr{background:#002f6c;color:#fff;padding:14px 20px;border-radius:8px;margin-bottom:4px;}
+  /* ── Global tightening ──────────────────────────────────────── */
+  .block-container{padding-top:0.5rem !important;padding-bottom:0.5rem !important;}
+  .stTabs [data-baseweb="tab-list"]{gap:0;border-bottom:1px solid #1a1a1a;}
+  .stTabs [data-baseweb="tab"]{padding:6px 16px;font-size:11px;font-weight:600;
+    letter-spacing:.06em;color:#444;}
+  .stTabs [aria-selected="true"]{color:#ff6600 !important;
+    border-bottom:2px solid #ff6600 !important;}
 
-  /* Urgency cards */
-  .urgency-critical{background:#1a0505;border:1px solid #c62828;
-    border-left:5px solid #ef5350;border-radius:10px;padding:14px 18px;margin:6px 0;
-    animation:pulse-r 2.5s ease-in-out infinite;}
-  .urgency-high{background:#1a0e05;border:1px solid #bf360c;
-    border-left:5px solid #ff6d00;border-radius:10px;padding:14px 18px;margin:6px 0;}
-  .urgency-medium{background:#06111a;border:1px solid #01579b;
-    border-left:5px solid #0288d1;border-radius:10px;padding:14px 18px;margin:6px 0;}
-  .urgency-low{background:#111;border:1px solid #1a1a1a;
-    border-left:5px solid #2a2a2a;border-radius:10px;padding:10px 14px;margin:4px 0;}
-  @keyframes pulse-r{
-    0%,100%{border-left-color:#ef5350;}
-    50%{border-left-color:#ff8a80;box-shadow:0 0 10px 2px rgba(239,83,80,.15);}
+  /* ── Bloomberg header bar ───────────────────────────────────── */
+  .bb-header{
+    background:#000;border-bottom:2px solid #ff6600;
+    padding:5px 10px 5px 10px;
+    display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:0;
   }
+  .bb-title{font-size:13px;font-weight:700;color:#e8e8e8;letter-spacing:.08em;}
+  .bb-sub{font-size:9px;color:#3a3a3a;margin-left:10px;letter-spacing:.05em;}
+  .bb-stats{font-size:9px;color:#3a3a3a;font-family:monospace;text-align:right;
+    letter-spacing:.04em;}
+  .bb-stat-hi{color:#ff6600;font-weight:700;}
+  .bb-stat-ok{color:#43a047;font-weight:600;}
+  .bb-stat-warn{color:#e65100;font-weight:600;}
 
-  /* Urgency labels */
-  .u-critical{background:#b71c1c;color:#ffcdd2;padding:3px 10px;
-    border-radius:999px;font-size:12px;font-weight:700;letter-spacing:.05em;}
-  .u-high{background:#bf360c;color:#ffccbc;padding:3px 10px;
-    border-radius:999px;font-size:12px;font-weight:600;}
-  .u-medium{background:#01579b;color:#b3e5fc;padding:3px 10px;
-    border-radius:999px;font-size:12px;font-weight:600;}
-  .u-low{background:#212121;color:#555;padding:3px 10px;
-    border-radius:999px;font-size:12px;}
+  /* ── Section labels ─────────────────────────────────────────── */
+  .bb-section{font-size:9px;font-weight:700;color:#3a3a3a;letter-spacing:.12em;
+    padding-bottom:4px;border-bottom:1px solid #181818;margin-bottom:5px;}
 
-  /* Action pills */
-  .pill{display:inline-block;padding:3px 10px;border-radius:999px;
-    font-size:11px;font-weight:600;margin-right:4px;}
-  .p-div{background:#1a3d1a;color:#81c784;}
-  .p-divsp{background:#0d3320;color:#a5d6a7;border:1px solid #2e7d32;}
-  .p-ma{background:#3d1a1a;color:#ef9a9a;}
-  .p-fdi{background:#1a2d3d;color:#90caf9;}
-  .p-buy{background:#3d2a1a;color:#ffcc80;}
-  .p-strat{background:#2d2a1a;color:#fff176;}
-  .p-split{background:#222;color:#888;}
-  .p-ipo{background:#1a1a3d;color:#b39ddb;}
+  /* ── Event rows (inside expanders) ─────────────────────────── */
+  .bb-row-crit{background:#0a0000;border-left:3px solid #ef5350;
+    padding:7px 10px;border-radius:0 3px 3px 0;margin:0;}
+  .bb-row-high{background:#090400;border-left:3px solid #ff8c00;
+    padding:7px 10px;border-radius:0 3px 3px 0;margin:0;}
+  .bb-row-med {background:#00040a;border-left:3px solid #1976d2;
+    padding:7px 10px;border-radius:0 3px 3px 0;margin:0;}
+  .bb-row-low {background:#050505;border-left:3px solid #222;
+    padding:7px 10px;border-radius:0 3px 3px 0;margin:0;}
 
-  /* Badges */
-  .client-badge{background:#0d2137;border:1px solid #1976d2;color:#64b5f6;
-    padding:2px 9px;border-radius:999px;font-size:11px;font-weight:600;}
-  .non-cl-badge{background:#1e1e1e;border:1px solid #333;color:#555;
-    padding:2px 9px;border-radius:999px;font-size:11px;}
-  .new-badge{background:#1b5e20;color:#a5d6a7;padding:2px 9px;
-    border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.06em;
-    animation:pulse-g 2s ease-in-out infinite;}
-  @keyframes pulse-g{0%,100%{opacity:1;}50%{opacity:.7;}}
-  .unver-badge{background:#1a1a10;border:1px solid #444;color:#777;
-    padding:1px 7px;border-radius:999px;font-size:10px;font-style:italic;}
+  /* ── FX signal bar ──────────────────────────────────────────── */
+  .bb-fx{background:#00040a;border-left:2px solid #1565c0;
+    padding:4px 9px;border-radius:0 2px 2px 0;
+    font-size:11px;color:#5c9bd6;margin:5px 0;line-height:1.45;}
+  .bb-fx-lbl{font-size:8px;font-weight:700;color:#1565c0;
+    letter-spacing:.07em;margin-right:5px;}
 
-  /* Groq verification badges */
-  .groq-verified{background:#0d2318;border:1px solid #2e7d32;color:#66bb6a;
-    padding:1px 8px;border-radius:999px;font-size:10px;font-weight:600;}
-  .groq-low{background:#1a1205;border:1px solid #5d4037;color:#a1887f;
-    padding:1px 8px;border-radius:999px;font-size:10px;}
-  .groq-pending{background:#111;border:1px solid #263238;color:#37474f;
-    padding:1px 8px;border-radius:999px;font-size:10px;}
+  /* ── Sub-event rows ─────────────────────────────────────────── */
+  .bb-sub{border-top:1px solid #0f0f0f;margin-top:5px;padding-top:4px;}
 
-  /* Date — large and prominent */
-  .event-date{font-size:15px;font-weight:600;color:#90a4ae;letter-spacing:.03em;
-    margin-bottom:4px;}
-  .event-date-rel{font-size:11px;color:#546e7a;margin-left:6px;}
-
-  /* Headline */
-  .headline{font-size:15px;font-weight:500;color:#eceff1;margin:6px 0 5px;
-    line-height:1.45;}
-
-  /* FX line */
-  .fx-line{background:#06111a;border-left:2px solid #0288d1;padding:7px 12px;
-    border-radius:0 6px 6px 0;font-size:13px;color:#90caf9;margin-top:8px;
-    line-height:1.5;}
-
-  /* Source link */
-  .src-link{font-size:11px;color:#37474f;text-decoration:none;}
-  .src-link:hover{color:#64b5f6;}
-
-  /* Sub-events (grouped below lead) */
-  .sub-event{background:#0d0d0d;border-left:2px solid #1a1a1a;
-    border-radius:0 6px 6px 0;padding:8px 12px;margin-top:6px;}
-  .sub-headline{font-size:13px;color:#9e9e9e;line-height:1.4;}
-  .sub-date{font-size:11px;color:#424242;margin-bottom:2px;}
-
-  /* Counters */
-  .counter-bar{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;}
-  .cc{border-radius:8px;padding:10px 14px;text-align:center;flex:1;min-width:70px;}
-  .cc-critical{background:#1a0505;border:1px solid #c62828;}
-  .cc-high{background:#1a0e05;border:1px solid #bf360c;}
-  .cc-medium{background:#06111a;border:1px solid #01579b;}
-  .cc-low{background:#111;border:1px solid #222;}
-  .cc-nc{background:#0a0a0a;border:1px solid #1a1a1a;}
-  .cc-num{font-size:22px;font-weight:500;}
-  .cc-lbl{font-size:10px;opacity:.6;margin-top:2px;}
-
-  /* Non-client box */
-  .nc-box{background:#0a0a0a;border:1px solid #1e1e1e;border-radius:8px;
-    padding:12px 14px;}
-  .nc-item{padding:7px 0;border-bottom:1px solid #141414;}
+  /* ── Non-pipeline box ───────────────────────────────────────── */
+  .nc-box{background:#050505;border:1px solid #151515;border-radius:3px;
+    padding:8px 10px;}
+  .nc-item{padding:4px 0;border-bottom:1px solid #0f0f0f;}
   .nc-item:last-child{border-bottom:none;}
 
-  /* Score chip */
-  .score-chip{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;}
+  /* ── Deep dive cards ────────────────────────────────────────── */
+  .dd-event{border-radius:3px;padding:8px 10px;margin-bottom:5px;border:1px solid #1a1a1a;}
+  .dd-high{border-left:3px solid #ef5350;background:#0a0000;}
+  .dd-medium{border-left:3px solid #ff8c00;background:#090400;}
+  .dd-low{border-left:3px solid #222;background:#050505;}
 
-  /* Deep dive */
-  .dd-event{border-radius:8px;padding:12px 14px;margin-bottom:8px;border:1px solid #1a1a1a;}
-  .dd-high{border-left:3px solid #ef5350;background:#1a0505;}
-  .dd-medium{border-left:3px solid #ff6d00;background:#1a0e05;}
-  .dd-low{border-left:3px solid #2a2a2a;background:#0a0a0a;}
+  /* ── Pill badges ────────────────────────────────────────────── */
+  .pill{display:inline-block;padding:1px 7px;border-radius:2px;
+    font-size:9px;font-weight:700;margin-right:3px;letter-spacing:.04em;}
+  .p-div{background:#0d200d;color:#66bb6a;}
+  .p-divsp{background:#0a1e0a;color:#a5d6a7;border:1px solid #2e7d32;}
+  .p-ma{background:#200d0d;color:#ef9a9a;}
+  .p-fdi{background:#0d1525;color:#90caf9;}
+  .p-buy{background:#201508;color:#ffcc80;}
+  .p-strat{background:#1a1805;color:#fff176;}
+  .p-split{background:#151515;color:#666;}
+  .p-ipo{background:#0d0d20;color:#b39ddb;}
+
+  /* Groq / source badges */
+  .groq-verified{background:#0a1a0a;border:1px solid #2e7d32;color:#43a047;
+    padding:1px 6px;border-radius:2px;font-size:9px;font-weight:600;}
+  .groq-pending{background:#0f0f0f;border:1px solid #1a1a1a;color:#333;
+    padding:1px 6px;border-radius:2px;font-size:9px;}
+  .src-link{font-size:10px;color:#333;text-decoration:none;}
+  .src-link:hover{color:#5c9bd6;}
+
+  @keyframes pulse-r{
+    0%,100%{border-left-color:#ef5350;}
+    50%{border-left-color:#ff8a80;box-shadow:0 0 6px 1px rgba(239,83,80,.1);}
+  }
+  .bb-row-crit{animation:pulse-r 3s ease-in-out infinite;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -382,149 +358,140 @@ def group_by_mnc(actions: list) -> list:
     return groups
 
 
-# ─── Card renderer ────────────────────────────────────────────────────────────
+# ─── Bloomberg-style card renderer ───────────────────────────────────────────
 
 def render_group(group: dict):
-    lead      = group["lead"]
-    others    = group["others"]
-    score     = lead["_score"]
-    u         = lead["_urgency"]
-    client    = lead.get("client") or {}
-    sp_div    = lead["action_type"]=="Dividend" and is_special_div(lead)
-    new_flag  = is_new(lead)
-    low_conf  = lead.get("_groq_confidence") == "low"
+    lead     = group["lead"]
+    others   = group["others"]
+    score    = lead["_score"]
+    u        = lead["_urgency"]
+    client   = lead.get("client") or {}
+    sp_div   = lead["action_type"] == "Dividend" and is_special_div(lead)
+    new_flag = is_new(lead)
 
-    nice_date, rel = format_date(lead.get("date",""))
+    nice_date, rel = format_date(lead.get("date", ""))
 
-    # Client info
-    if client:
-        client_info = (
-            f'<strong style="color:#eceff1;">{client.get("indian_subsidiary","")}</strong>'
-            f' &nbsp;→&nbsp; <span style="color:#64b5f6;">{client.get("client_group","")}</span>'
-            f' &nbsp;·&nbsp; <strong style="color:#a5d6a7;">'
-            f'${client.get("net_nih_exposure",0):,.0f}M</strong>'
-        )
-    else:
-        client_info = f'<span style="color:#555;">{lead.get("company_name","")}</span>'
+    urg_color = {"critical":"#ef5350","high":"#ff8c00",
+                 "medium":"#1976d2","low":"#2a2a2a"}[u]
+    row_cls   = {"critical":"bb-row-crit","high":"bb-row-high",
+                 "medium":"bb-row-med","low":"bb-row-low"}[u]
 
-    # Amount
+    atype       = lead["action_type"]
+    atype_lbl   = "SP.DIV" if sp_div else atype.upper()
+    atype_color = "#a5d6a7" if sp_div else {
+        "Dividend":"#66bb6a","M&A":"#ef9a9a","FDI":"#90caf9",
+        "Buyback":"#ffcc80","Strategic":"#fff176",
+        "Stock Split":"#888","IPO":"#b39ddb","Other":"#555"
+    }.get(atype, "#888")
+
     amt_str = ""
-    if lead.get("amount") and lead.get("currency")=="INR":
-        amt_str = f' &nbsp;·&nbsp; <strong style="color:#a5d6a7;">₹{lead["amount"]:,.2f}/sh</strong>'
-    elif lead.get("amount") and lead.get("currency")=="USD":
-        amt_str = f' &nbsp;·&nbsp; <strong style="color:#90caf9;">${lead["amount"]:,.0f}M</strong>'
+    if lead.get("amount"):
+        amt_str = (f"₹{lead['amount']:,.2f}/sh" if lead.get("currency")=="INR"
+                   else f"${lead['amount']:,.0f}M")
 
-    # Foreign entity
-    fe_str = (f' &nbsp;·&nbsp; <span style="color:#ffcc80;">↔ {lead["foreign_entity"]}</span>'
-              if lead.get("foreign_entity") else "")
+    sub = client.get("indian_subsidiary", lead.get("company_name",""))[:40]
+    mnc = (client.get("client_group") or group["mnc_parent"])[:32]
+    nih = client.get("net_nih_exposure", 0) or 0
+    inr_ok = (lead.get("_groq_confidence") in ("high","medium")
+              and lead.get("_inr_involved") is True)
 
-    # Client/non-client badge
-    cl_badge = ('<span class="client-badge">Current client</span>'
-                if lead["is_scb_client"] else
-                '<span class="non-cl-badge">Non-client</span>')
-
-    # New badge
-    new_html  = '<span class="new-badge">NEW</span> ' if new_flag else ""
-
-    # Groq verification badge — 3 states
-    conf = lead.get("_groq_confidence")
-    inr  = lead.get("_inr_involved")
-    if conf in ("high", "medium") and inr is True:
-        groq_html = '<span class="groq-verified">✓ INR verified</span> '
-    elif conf == "low":
-        groq_html = '<span class="groq-low">⚠ low confidence</span> '
-    elif conf is None:
-        groq_html = '<span class="groq-pending">○ pending scan</span> '
-    else:
-        groq_html = '<span class="groq-low">⚠ unverified</span> '
-
-    # Source link
-    link = source_link(lead)
-    link_html = f'<a href="{link}" target="_blank" class="src-link">📰 {source_label(lead)} →</a>'
-
-    # Others count
-    others_label = f" +{len(others)} more" if others else ""
-
-    # FX implication for high/critical SCB clients
+    # FX implication
     fx_html = ""
     if lead["is_scb_client"] and score >= 50 and GROQ_API_KEY and client:
-        amt_display = (f"₹{lead['amount']:.2f}/share"
-                       if lead.get("amount") and lead.get("currency")=="INR"
-                       else f"${lead['amount']:.0f}M" if lead.get("amount") else "")
+        amt_disp = (f"₹{lead['amount']:.2f}/sh"
+                    if lead.get("amount") and lead.get("currency")=="INR"
+                    else f"${lead['amount']:.0f}M" if lead.get("amount") else "")
         impl = fx_implication(
             lead["headline"], lead["action_type"],
             client.get("indian_subsidiary",""),
             client.get("client_group",""),
-            amt_display,
-            float(client.get("net_nih_exposure",0) or 0),
+            amt_disp,
+            float(client.get("net_nih_exposure", 0) or 0),
         )
         if impl:
-            fx_html = f'<div class="fx-line">FX → {impl}</div>'
+            fx_html = (f'<div class="bb-fx">'
+                       f'<span class="bb-fx-lbl">FX ▶</span>{impl}</div>')
 
-    # Sub-events HTML — cap to 1 per action_type to keep cards compact
-    sub_html = ""
+    # Sub-events — one per action_type
+    sub_html   = ""
     seen_types = set()
-    capped_others = []
     for o in others:
         ot = o.get("action_type","Other")
-        if ot not in seen_types:
-            seen_types.add(ot)
-            capped_others.append(o)
+        if ot in seen_types: continue
+        seen_types.add(ot)
+        o_nice, _ = format_date(o.get("date",""))
+        o_link    = source_link(o)
+        sub_html += (
+            f'<div style="border-top:1px solid #0f0f0f;margin-top:4px;padding-top:4px;">'
+            f'<span style="font-size:9px;color:#555;font-weight:700;">{ot.upper()}</span>'
+            f'&nbsp;<span style="font-size:11px;color:#555;">{o["headline"][:130]}</span>'
+            f'&nbsp;<a href="{o_link}" target="_blank" class="src-link">→</a>'
+            f'<span style="font-size:9px;color:#333;margin-left:5px;">{o_nice[:6]}</span>'
+            f'</div>'
+        )
 
-    others_label = f" +{len(others)} more" if others else ""
+    # Expander title — dense plain-text Bloomberg row
+    star    = "★ " if u == "critical" else ""
+    new_mk  = "  ◆NEW" if new_flag else ""
+    more    = f"  +{len(others)}" if others else ""
+    amt_mk  = f"  {amt_str}" if amt_str else ""
+    d_short = nice_date[:6] if nice_date else ""
+    r_short = (" (TODAY)" if rel=="today" else f" ({rel})" if rel else "")
 
-    for o in capped_others:
-        o_nice, o_rel = format_date(o.get("date",""))
-        o_link = source_link(o)
-        sub_html += f"""
-        <div class="sub-event">
-          <div class="sub-date">{o_nice}
-            {f'<span style="font-size:10px;color:#424242;">· {o_rel}</span>' if o_rel else ""}
-          </div>
-          <div class="sub-headline">
-            {action_pill(o)}
-            {o['headline'][:160]}
-            &nbsp;
-            <a href="{o_link}" target="_blank" class="src-link">→</a>
-          </div>
-        </div>
-        """
+    exp_title = (f"{star}{mnc}  ·  {atype_lbl}"
+                 f"{amt_mk}  ·  {d_short}{r_short}{more}{new_mk}")
 
-    # Title for expander
-    exp_title = (
-        f"{'★ ' if u=='critical' else ''}"
-        f"{group['mnc_parent'][:40]}"
-        f" · {lead['action_type']}{'★' if sp_div else ''}"
-        f"{others_label}"
-    )
+    link     = source_link(lead)
+    expanded = u in ("critical","high") and lead["is_scb_client"]
 
-    with st.expander(exp_title,
-                     expanded=(u in ("critical","high") and lead["is_scb_client"])):
+    with st.expander(exp_title, expanded=expanded):
+        inr_badge = (
+            '<span style="font-size:9px;background:#0a1a0a;color:#43a047;'
+            'padding:1px 5px;border-radius:2px;margin-left:3px;">INR✓</span>'
+            if inr_ok else
+            '<span style="font-size:9px;background:#0f0f0f;color:#2a2a2a;'
+            'padding:1px 5px;border-radius:2px;margin-left:3px;">pend</span>'
+        )
+        new_badge = (
+            '<span style="font-size:9px;background:#0a200a;color:#69f0ae;'
+            'padding:1px 5px;border-radius:2px;margin-left:3px;font-weight:700;">NEW</span>'
+            if new_flag else ""
+        )
+        nih_str  = (f' · <strong style="color:#66bb6a;">${nih:,.0f}M NIH</strong>'
+                    if nih > 0 else "")
+        amt_part = (f' · <span style="color:#a5d6a7;">{amt_str}</span>'
+                    if amt_str else "")
+        fe_str   = (f' · <span style="color:#ffcc80;">↔ {lead["foreign_entity"]}</span>'
+                    if lead.get("foreign_entity") else "")
+
         st.markdown(f"""
-        <div class="urgency-{u}">
-          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px;">
-            {urgency_pill(score)} {action_pill(lead)}
-            {cl_badge} {sc_chip(score)} {new_html}{groq_html}
+        <div class="{row_cls}">
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px;flex-wrap:wrap;">
+            <span style="font-size:9px;font-weight:700;color:{urg_color};
+                         letter-spacing:.07em;">{u.upper()}</span>
+            <span style="font-size:9px;font-weight:700;color:{atype_color};
+                         background:{atype_color}18;padding:1px 6px;border-radius:2px;">
+              {atype_lbl}
+            </span>
+            <span style="font-size:9px;color:#444;background:#0d0d0d;
+                         padding:1px 5px;border-radius:2px;">{score}</span>
+            {new_badge}{inr_badge}
           </div>
-
-          <div class="event-date">
-            {nice_date}
-            {f'<span class="event-date-rel">({rel})</span>' if rel else ""}
+          <div style="font-size:11px;color:#777;margin-bottom:4px;line-height:1.4;">
+            <strong style="color:#ccc;">{sub}</strong>
+            &nbsp;→&nbsp;<span style="color:#5c9bd6;">{mnc}</span>
+            {nih_str}{amt_part}{fe_str}
+            &nbsp;·&nbsp;<span style="color:#444;">{d_short}{r_short}</span>
           </div>
-
-          <div class="headline">{lead['headline'][:220]}</div>
-
-          <div style="font-size:12px;color:#78909c;margin-top:3px;">
-            {client_info}{amt_str}{fe_str}
+          <div style="font-size:12px;color:#999;line-height:1.45;margin-bottom:4px;">
+            {lead["headline"][:220]}
           </div>
-
           {fx_html}
-
-          <div style="margin-top:8px;display:flex;align-items:center;gap:10px;">
-            {link_html}
-            {f"<span style='font-size:11px;color:#37474f;'>· {lead.get('raw_detail','')[:100]}</span>" if lead.get('raw_detail') else ""}
+          <div style="margin-top:4px;">
+            <a href="{link}" target="_blank" class="src-link">
+              📰 {source_label(lead)} →
+            </a>
           </div>
-
           {sub_html}
         </div>
         """, unsafe_allow_html=True)
@@ -533,11 +500,11 @@ def render_group(group: dict):
 # ─── Load registry ────────────────────────────────────────────────────────────
 
 st.markdown("""
-<div class="hdr">
-  <strong style="font-size:18px;">🏦 SCB — Corporate Actions Intelligence</strong><br>
-  <span style="font-size:12px;opacity:0.8;">
-    MNC subsidiaries · SCB FX Pipeline v7 · INR-relevant events only
-  </span>
+<div class="bb-header">
+  <div>
+    <span class="bb-title">🏦 SCB CORPORATE ACTIONS INTELLIGENCE</span>
+    <span class="bb-sub">MNC SUBSIDIARIES · FX PIPELINE v7 · INR FLOWS ONLY</span>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -554,54 +521,53 @@ with tab_live:
   # ── Fetch main feed FIRST (user sees dashboard immediately) ───────────────
     with st.spinner("Scanning sources..."):
         raw, signal_clients, total_scanned = fetch_all_corporate_actions(registry)
-    # Stats row
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-    with c1:
-        st.metric("News Scanned", total_scanned)
-    with c2:
-        try:
-            from batch_manager import load_cache
-            _cache = load_cache()
-            deep_scans = sum(1 for k, v in _cache.items()
-                             if k != "_meta" and v.get("last_searched"))
-        except Exception:
-            deep_scans = 0
-        st.metric("Deep Scans Today", deep_scans)
-    with c3:
-        prog_early = get_progress(registry, load_cache())
-        remaining_early = prog_early["total"] - prog_early["fresh_24h"]
-        st.metric("Groq Scanned", f'{prog_early["fresh_24h"]}/{prog_early["total"]}',
-                  delta=f'{remaining_early} remaining', delta_color="off")
-    with c4:
-        tok     = get_token_status()
-        used    = tok["total_used"]
-        budget  = tok["total_budget"]
-        pct     = tok["pct"]
-        ws_cl   = tok["web_search_clients"]
-        reset   = tok["ist_reset"]
-        at_lim  = tok["at_limit"]
-        bar_col = "#d32f2f" if at_lim else ("#BA7517" if pct > 70 else "#1D9E75")
-        limit_warn = '<div style="font-size:10px;color:#d32f2f;font-weight:600;">⚠ Token limit reached — web search paused</div>' if at_lim else ""
-        st.markdown(
-            f'<div style="padding-top:2px;">'
-            f'<div style="font-size:11px;color:#546e7a;">Groq tokens today</div>'
-            f'<div style="font-size:15px;font-weight:500;color:{bar_col};">'
-            f'{used:,} <span style="font-size:11px;color:#37474f;">/ {budget:,}</span></div>'
-            f'<div style="background:#1a1a1a;border-radius:3px;height:4px;margin:3px 0;">'
-            f'<div style="width:{min(pct,100)}%;height:4px;border-radius:3px;'
-            f'background:{bar_col};transition:width .4s;"></div></div>'
-            f'<div style="font-size:10px;color:#37474f;">'
-            f'{ws_cl} web searches · resets {reset}</div>'
-            f'{limit_warn}'
-            f'</div>', unsafe_allow_html=True)
+    # ── Compact stats bar ─────────────────────────────────────────────────────
+    try:
+        from batch_manager import load_cache as _lc
+        _cache_stats = _lc()
+        import datetime as _dt
+        _now = _dt.datetime.now()
+        deep_scans_24h = sum(
+            1 for k, v in _cache_stats.items()
+            if k != "_meta" and v.get("last_searched") and
+            (_now - _dt.datetime.fromisoformat(v["last_searched"])).total_seconds() < 86400
+        )
+    except Exception:
+        _cache_stats  = {}
+        deep_scans_24h = 0
 
-    ref_col, _ = st.columns([1,5])
-    with ref_col:
+    _prog  = get_progress(registry, _cache_stats if _cache_stats else load_cache())
+    _tok   = get_token_status()
+    _used  = _tok["total_used"]
+    _budg  = _tok["total_budget"]
+    _pct   = _tok["pct"]
+    _reset = _tok["ist_reset"]
+    _fresh = _prog["fresh_24h"]
+    _total = _prog["total"]
+    _tok_col  = "bb-stat-warn" if _pct > 80 else "bb-stat-ok"
+    _cov_col  = "bb-stat-ok"   if _fresh > 0 else "bb-stat-warn"
+
+    _sb_col, _sb_btn = st.columns([5, 1])
+    with _sb_col:
+        st.markdown(
+            f'<div style="background:#050505;border:1px solid #151515;border-radius:2px;'
+            f'padding:4px 10px;font-size:9px;font-family:monospace;color:#3a3a3a;'
+            f'letter-spacing:.04em;">'
+            f'ARTICLES <span class="bb-stat-hi">{total_scanned}</span>'
+            f'&nbsp;&nbsp;|&nbsp;&nbsp;'
+            f'GROQ COV <span class="{_cov_col}">{_fresh}/{_total}</span>'
+            f'&nbsp;&nbsp;|&nbsp;&nbsp;'
+            f'DEEP SCANS(24H) <span class="bb-stat-hi">{deep_scans_24h}</span>'
+            f'&nbsp;&nbsp;|&nbsp;&nbsp;'
+            f'TOKENS <span class="{_tok_col}">{_used:,}/{_budg:,}</span>'
+            f'&nbsp;&nbsp;|&nbsp;&nbsp;'
+            f'RESETS {_reset}'
+            f'</div>',
+            unsafe_allow_html=True)
+    with _sb_btn:
         if st.button("⟳ Refresh", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-
-    st.divider()
 
     for a in raw:
         # Hard drop: Groq-marked non-significant items with no INR flow
@@ -630,79 +596,18 @@ with tab_live:
          and a["action_type"] not in ("Other","Stock Split")],
         key=lambda x: x["_score"], reverse=True)
 
-    critical = [a for a in client_actions if a["_urgency"]=="critical"]
-    high     = [a for a in client_actions if a["_urgency"]=="high"]
-    medium   = [a for a in client_actions if a["_urgency"]=="medium"]
-    low      = [a for a in client_actions if a["_urgency"]=="low"]
-
-    # Counter bar
-    st.markdown(f"""
-    <div class="counter-bar">
-      <div class="cc cc-critical">
-        <div class="cc-num" style="color:#ef5350;">{len(critical)}</div>
-        <div class="cc-lbl" style="color:#ef9a9a;">Critical</div>
-      </div>
-      <div class="cc cc-high">
-        <div class="cc-num" style="color:#ff6d00;">{len(high)}</div>
-        <div class="cc-lbl" style="color:#ffcc80;">High</div>
-      </div>
-      <div class="cc cc-medium">
-        <div class="cc-num" style="color:#0288d1;">{len(medium)}</div>
-        <div class="cc-lbl" style="color:#b3e5fc;">Medium</div>
-      </div>
-      <div class="cc cc-low">
-        <div class="cc-num" style="color:#555;">{len(low)}</div>
-        <div class="cc-lbl" style="color:#444;">Low</div>
-      </div>
-      <div class="cc cc-nc">
-        <div class="cc-num" style="color:#444;">{len(non_client_actions)}</div>
-        <div class="cc-lbl" style="color:#2a2a2a;">Non-pipeline</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # AI briefing
-    snapshot = make_snapshot(client_actions)
-    if GROQ_API_KEY and snapshot:
-        st.markdown("""
-        <div style="background:#0a1628;border:1px solid #1e3a5f;border-radius:10px;
-                    padding:14px 18px;margin-bottom:12px;">
-          <div style="font-size:11px;font-weight:600;color:#64b5f6;
-                      letter-spacing:.06em;margin-bottom:8px;">
-            ◆ AI DAILY BRIEFING — FX DESK
-          </div>
-        """, unsafe_allow_html=True)
-        with st.spinner("Generating briefing..."):
-            brief = daily_briefing(snapshot)
-        if brief:
-            for line in brief.split("\n"):
-                line = line.strip()
-                if not line: continue
-                line = re.sub(r'\*\*(.+?)\*\*',
-                    r'<strong style="color:#eceff1;">\1</strong>', line)
-                color = "#b0bec5" if line.startswith(("•","-")) else "#546e7a"
-                pad   = "padding:3px 0 3px 4px;" if line.startswith(("•","-")) else ""
-                st.markdown(
-                    f'<div style="font-size:13px;color:{color};line-height:1.8;{pad}">'
-                    f'{line}</div>', unsafe_allow_html=True)
-        st.markdown(
-            f'<div style="font-size:10px;color:#263238;margin-top:8px;">'
-            f'Groq / Llama 3 &nbsp;·&nbsp; {len(snapshot)} signals &nbsp;·&nbsp; '
-            f'Cached 30 min</div></div>', unsafe_allow_html=True)
-
-    st.divider()
-
-    # Filters
-    fc1,fc2,fc3 = st.columns([2,2,2])
+    # Filters — compact inline row
+    fc1, fc2, fc3 = st.columns([2, 2, 2])
     with fc1:
-        f_type = st.selectbox("Action type",
-            ["All"] + sorted({a["action_type"] for a in client_actions}))
+        f_type = st.selectbox("Type",
+            ["All"] + sorted({a["action_type"] for a in client_actions}),
+            label_visibility="collapsed")
     with fc2:
-        f_urg  = st.selectbox("Min urgency",
-            ["All","Medium+","High+","Critical only"])
+        f_urg = st.selectbox("Urgency",
+            ["All","Medium+","High+","Critical only"],
+            label_visibility="collapsed")
     with fc3:
-        new_only = st.toggle("NEW only", value=False,
-                             help="Show only events flagged as new this week")
+        new_only = st.toggle("NEW only", value=False)
 
     def apply_f(lst):
         if f_type != "All":  lst = [a for a in lst if a["action_type"]==f_type]
@@ -718,13 +623,10 @@ with tab_live:
 
     filtered = apply_f(client_actions)
     st.caption(
-        f"**{len(filtered)} current client actions** · "
+        f"**{len(filtered)}** client actions · "
         f"{len(non_client_actions)} non-pipeline · "
         f"{sum(1 for a in filtered if is_new(a))} new this week"
     )
-
-    # Main layout — full width, no sidebar
-    prog = prog_early   # already fetched above
 
     col_feed = st.container()
     with col_feed:
@@ -732,18 +634,17 @@ with tab_live:
             st.info("No actions match filters. Try adjusting or refreshing.")
         else:
             groups = group_by_mnc(filtered)
-            div_groups     = [g for g in groups[:50]
+            div_groups     = [g for g in groups[:60]
                               if g["lead"]["action_type"] in
                               ("Dividend","Dividend_Special","Stock Split","Buyback")]
-            non_div_groups = [g for g in groups[:50]
+            non_div_groups = [g for g in groups[:60]
                               if g["lead"]["action_type"] not in
                               ("Dividend","Dividend_Special","Stock Split","Buyback")]
 
-            col_main, col_div = st.columns([3, 2], gap="medium")
+            col_main, col_div = st.columns([3, 2], gap="small")
             with col_main:
                 st.markdown(
-                    '<div style="font-size:12px;font-weight:600;color:#546e7a;'
-                    'letter-spacing:.05em;margin-bottom:8px;">M&A · FDI · STRATEGIC</div>',
+                    '<div class="bb-section">M&A · FDI · STRATEGIC · BUYBACK · IPO</div>',
                     unsafe_allow_html=True)
                 if non_div_groups:
                     for grp in non_div_groups:
@@ -752,8 +653,7 @@ with tab_live:
                     st.caption("No M&A / FDI / Strategic actions.")
             with col_div:
                 st.markdown(
-                    '<div style="font-size:12px;font-weight:600;color:#546e7a;'
-                    'letter-spacing:.05em;margin-bottom:8px;">DIVIDENDS · CORPORATE EVENTS</div>',
+                    '<div class="bb-section">DIVIDENDS · CORPORATE EVENTS</div>',
                     unsafe_allow_html=True)
                 if div_groups:
                     for grp in div_groups:
