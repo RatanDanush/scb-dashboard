@@ -87,39 +87,46 @@ def build_priority_queue(registry: dict,
                     M&A/FDI/Strategic/IPO/Buyback this refresh
 
     Priority:
-      P1 — in signal_clients (any tier)
-      P2 — Tier 1, not in signal_clients, not searched today
-      P3 — Tier 2, not in signal_clients, not searched today
-      P4 — everyone else (skipped — RSS only)
+      P1 — in signal_clients (any tier) — bypasses daily-search limit;
+           re-searched whenever fresh RSS signal fires
+      P2 — Tier 1, not signal, not searched today
+      P3 — Tier 2, not signal, not searched today
+      P4 — Tier 3 / untiered, not searched today (fills remaining budget)
+
+    All tiers sorted by NIH exposure desc within each bucket.
+    Token budget cap in run_next_batch limits total calls per day.
     """
     from token_tracker import client_already_searched
 
     all_recs = [r for r in registry["all"]
                 if r.get("indian_subsidiary") and r.get("client_group")]
 
-    p1, p2, p3 = [], [], []
+    p1, p2, p3, p4 = [], [], [], []
 
     for rec in all_recs:
-        key = _client_key(rec)
-
-        # Skip if already searched today (token tracker tracks this)
-        if client_already_searched(key):
-            continue
-
+        key  = _client_key(rec)
         tier = rec.get("priority_tier","") or ""
 
         if key in signal_clients:
-            p1.append(rec)                         # always search
-        elif "TIER 1" in tier.upper():
+            p1.append(rec)                         # always re-search on fresh signal
+            continue
+
+        # Skip non-signal companies already searched today
+        if client_already_searched(key):
+            continue
+
+        if "TIER 1" in tier.upper():
             p2.append(rec)
         elif "TIER 2" in tier.upper():
             p3.append(rec)
+        else:
+            p4.append(rec)                         # Tier 3 / untiered — fill with budget
 
     # Sort within each priority by NIH exposure desc
-    for lst in [p1, p2, p3]:
+    for lst in [p1, p2, p3, p4]:
         lst.sort(key=lambda r: r.get("net_nih_exposure",0) or 0, reverse=True)
 
-    return p1 + p2 + p3
+    return p1 + p2 + p3 + p4
 
 
 # ─── Main runner ──────────────────────────────────────────────────────────────

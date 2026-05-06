@@ -181,9 +181,9 @@ def _search_one_client(rec: dict) -> list:
 
 @st.cache_data(ttl=1800)
 def fetch_active_search(tier1_keys: tuple, tier2_keys: tuple,
-                        _snapshot: tuple) -> list:
+                        tier3_keys: tuple, _snapshot: tuple) -> list:
     """
-    Cached active search for Tier 1 + Tier 2 clients.
+    Cached active search for Tier 1 + Tier 2 + top Tier 3 clients.
     _snapshot is used only as a cache key.
     """
     from client_registry import load_registry
@@ -199,7 +199,8 @@ def fetch_active_search(tier1_keys: tuple, tier2_keys: tuple,
 
     all_actions = []
     searched    = 0
-    all_keys    = list(tier1_keys) + list(tier2_keys[:50])
+    # Tier 1 + Tier 2 (full); Tier 3 top-40 by NIH
+    all_keys    = list(tier1_keys) + list(tier2_keys[:50]) + list(tier3_keys)
 
     for key in all_keys:
         rec = by_key.get(key)
@@ -213,7 +214,7 @@ def fetch_active_search(tier1_keys: tuple, tier2_keys: tuple,
 
 
 def get_search_keys(registry: dict):
-    """Return hashable keys for Tier 1 + Tier 2 clients."""
+    """Return hashable keys for Tier 1 + Tier 2 clients, plus top Tier 3 by NIH."""
     tier1 = tuple(
         (r.get("client_group",""), r.get("indian_subsidiary",""))
         for r in registry["all"]
@@ -224,5 +225,17 @@ def get_search_keys(registry: dict):
         for r in registry["all"]
         if "TIER 2" in (r.get("priority_tier",""))
     )
+    # Top 40 Tier 3 / untiered companies by NIH exposure — ensures BASF, etc. get RSS scanned
+    tier3_top = tuple(
+        (r.get("client_group",""), r.get("indian_subsidiary",""))
+        for r in sorted(
+            [r for r in registry["all"]
+             if "TIER 1" not in (r.get("priority_tier","") or "").upper()
+             and "TIER 2" not in (r.get("priority_tier","") or "").upper()
+             and r.get("indian_subsidiary")],
+            key=lambda r: r.get("net_nih_exposure", 0) or 0,
+            reverse=True
+        )[:40]
+    )
     snap = tuple(r.get("indian_subsidiary","")[:15] for r in registry["all"][:10])
-    return tier1, tier2, snap
+    return tier1, tier2, tier3_top, snap

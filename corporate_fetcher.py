@@ -370,8 +370,8 @@ def fetch_all_corporate_actions(registry: dict) -> tuple:
     # Active Google News search
     try:
         from active_searcher import fetch_active_search, get_search_keys
-        t1, t2, snap = get_search_keys(registry)
-        active = fetch_active_search(t1, t2, snap)
+        t1, t2, t3, snap = get_search_keys(registry)
+        active = fetch_active_search(t1, t2, t3, snap)
         raw += active
         print(f"  Active search: {len(active)} items")
     except Exception as ex:
