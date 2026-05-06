@@ -140,6 +140,7 @@ def _search_one_client(rec: dict) -> list:
         queries.append(f'"{sub_q}" acquisition OR merger OR deal OR investment')
         queries.append(f'"{sub_q}" stake OR IPO OR JV OR expansion')
         queries.append(f'"{sub_q}" India 2025 OR 2026')
+        queries.append(f'"{sub_q}" India')          # bare India query — catches any India news
     if len(grp_q) > 4:
         queries.append(f'"{grp_q}" India acquisition OR investment OR expansion 2025 OR 2026')
 

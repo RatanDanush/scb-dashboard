@@ -530,12 +530,19 @@ def fetch_all_corporate_actions(registry: dict) -> tuple:
     enriched.sort(key=lambda x: x.get("date") or "", reverse=True)
 
     # Extract signal clients for batch priority
+    # P1: any company that active_searcher found news for (including "Other" type)
+    # — ensures freshly-newsworthy companies get re-Groq-searched even if RSS
+    #   didn't classify them as M&A/FDI/Strategic yet
     signal_clients = set()
     for a in enriched:
-        if a.get("action_type") in WEB_SEARCH_TRIGGER_TYPES and a.get("client"):
-            c   = a["client"]
-            key = f"{c.get('client_group','')}|{c.get('indian_subsidiary','')}"
-            signal_clients.add(key)
+        c = a.get("client")
+        if not c:
+            continue
+        key = f"{c.get('client_group','')}|{c.get('indian_subsidiary','')}"
+        if a.get("action_type") in WEB_SEARCH_TRIGGER_TYPES:
+            signal_clients.add(key)                        # always include trigger types
+        elif a.get("source","") == "Google News" and a.get("_pre_matched"):
+            signal_clients.add(key)                        # also include: RSS found something
 
     scb = sum(1 for a in enriched if a["is_scb_client"])
     print(f"After dedup: {len(enriched)} unique | {scb} SCB clients")
