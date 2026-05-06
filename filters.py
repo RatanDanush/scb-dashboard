@@ -201,3 +201,94 @@ def pre_filter(headline: str) -> bool:
     Returns False if headline is obvious noise.
     """
     return not is_market_commentary(headline)
+
+
+# ─── Non-India geography override ────────────────────────────────────────────
+# The 8b model sometimes marks inr_involved=True for investments in France,
+# Germany, Ohio etc. These deterministic checks override that.
+
+NON_INDIA_GEOS = [
+    # "in X" phrases
+    "in france", "in germany", "in the us", "in the usa", "in the united states",
+    "in ohio", "in alabama", "in texas", "in california", "in michigan",
+    "in the uk", "in united kingdom", "in china", "in japan", "in south korea",
+    "in australia", "in canada", "in mexico", "in brazil",
+    "in europe", "in pakistan", "in bangladesh", "in vietnam", "in indonesia",
+    "in thailand", "in malaysia", "in saudi arabia", "in the uae", "in dubai",
+    "in the netherlands", "in netherlands", "in belgium", "in spain",
+    "in italy", "in poland", "in sweden", "in norway", "in finland",
+    # bare country names (safe because INVESTMENT_KEYWORDS guard is required)
+    "netherlands", "germany", "france", "united states", "united kingdom",
+    "australia", "canada", "brazil", "south korea", "saudi arabia",
+    # adjective forms
+    "european facility", "european plant", "european factory",
+    "french facility", "french plant", "french factory",
+    "german facility", "german plant", "german factory", "germany factory",
+    "american facility", "american plant",
+]
+
+INVESTMENT_KEYWORDS = [
+    "invest", "investment", "facility", "plant", "factory",
+    "expansion", "expands", "manufactur", "production",
+    "greenfield", "new site", "new center", "new centre",
+    "refiner", "data cent", "set up", "establishes", "warehouse",
+]
+
+def is_non_india_geography_investment(headline: str) -> bool:
+    """
+    Returns True (should force inr_involved=False) if the headline describes
+    an investment / facility in a non-India location with no India mention.
+
+    Catches: "Cargill announces major investment ... facility in France"
+    Safe:    any headline that mentions India / Indian.
+    """
+    h = headline.lower()
+    if "india" in h or "indian" in h:
+        return False
+    if not any(kw in h for kw in INVESTMENT_KEYWORDS):
+        return False
+    return any(geo in h for geo in NON_INDIA_GEOS)
+
+
+# ─── IPO subject mismatch detector ───────────────────────────────────────────
+# Catches: "AI Boom Update: Cerebras IPO, Apple vs Big Tech AI Spend"
+# The 8b model sees "Apple" + "IPO" and attributes the IPO to Apple India.
+
+def is_ipo_mismatch(headline: str, client_name: str) -> bool:
+    """
+    Returns True if 'X IPO' appears in the headline where X is a capitalised
+    company name clearly different from the matched client.
+
+    Safe:    "Apple India files for IPO", "Apple IPO approval from SEBI"
+    Catches: "Cerebras IPO, Apple vs Big Tech AI Spend" (client = Apple India)
+    """
+    import re
+    h = headline.lower()
+    if "ipo" not in h:
+        return False
+
+    # Find capitalised company name(s) immediately before "IPO"
+    named_ipos = re.findall(
+        r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,3})\s+IPO\b',
+        headline
+    )
+    if not named_ipos:
+        return False   # no "X IPO" pattern — don't filter
+
+    # Build client core words (4+ chars, strip generic stops)
+    name = client_name.lower()
+    for stop in ["india", "pvt", "ltd", "limited", "private",
+                 "group", "inc", "corp", "corporation"]:
+        name = name.replace(stop, "").strip()
+    name = re.sub(r'\s+', ' ', name).strip()
+    client_words = {w for w in re.split(r'\W+', name) if len(w) >= 4}
+    if not client_words:
+        return False
+
+    # If ANY named IPO subject matches a client word → client IS the IPO entity
+    for subject in named_ipos:
+        subj_lower = subject.lower()
+        if any(cw in subj_lower for cw in client_words):
+            return False   # client is the IPO entity — keep
+
+    return True   # all named IPO subjects are different companies → mismatch

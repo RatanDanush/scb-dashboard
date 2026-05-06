@@ -353,8 +353,8 @@ def fetch_all_corporate_actions(registry: dict) -> tuple:
     for batch_manager to prioritise Groq web search.
     """
     from client_registry import match_by_name
-    from filters import pre_filter, WEB_SEARCH_TRIGGER_TYPES
-
+    from filters import (pre_filter, WEB_SEARCH_TRIGGER_TYPES,
+                         is_non_india_geography_investment, is_ipo_mismatch)
     all_tickers = list(registry["by_ticker"].keys())
     print(f"\n{'='*60}")
     print(f"Fetching | window {_fmt(_from_dt())} → {_fmt(_to_dt())}")
@@ -447,6 +447,8 @@ def fetch_all_corporate_actions(registry: dict) -> tuple:
             print(f"  Groq classifier error: {ex}")
 
     # Step 4: Apply filters
+    from filters import (pre_filter, WEB_SEARCH_TRIGGER_TYPES,
+                         is_non_india_geography_investment, is_ipo_mismatch)
     pre_count    = len(raw)
     filtered_raw = []
     for a in raw:
@@ -455,6 +457,28 @@ def fetch_all_corporate_actions(registry: dict) -> tuple:
         is_news = any(s in source for s in ["Google News","News —","Groq web",
                                              "Moneycontrol","Economic",
                                              "Business Standard","Mint"])
+
+        if is_news:
+            headline = a.get("headline","")
+
+            # ── Deterministic override 1: non-India geography investment ──────
+            # Groq-8b sometimes marks "Cargill invests in France" as INR-relevant.
+            # Code always knows France ≠ India.
+            if is_non_india_geography_investment(headline):
+                a["_inr_involved"] = False
+
+            # ── Deterministic override 2: IPO subject mismatch ────────────────
+            # Groq-8b sees "Cerebras IPO, Apple vs Big Tech" and attributes the
+            # IPO to Apple India. Check who the actual IPO entity is.
+            if atype == "IPO":
+                pre     = a.get("_pre_matched") or {}
+                subname = (pre.get("indian_subsidiary","") or
+                           pre.get("client_group","") or
+                           a.get("company_name",""))
+                if subname and is_ipo_mismatch(headline, subname):
+                    a["_is_primary_subject"] = False
+                    a["_groq_significant"]   = False
+
         if is_news and not a.get("_inr_involved", True):           continue
         if is_news and a.get("_skip_india_india", False):          continue
         if atype == "Dividend" and is_news and not a.get("_indian_sub_div", True): continue
