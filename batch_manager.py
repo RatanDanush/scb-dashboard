@@ -113,6 +113,18 @@ def build_priority_queue(registry: dict,
 
         # Skip non-signal companies already searched today
         if client_already_searched(key):
+            # Exception: Tier 1 can be re-searched every 8h
+            # (important clients should never sit on stale data all day)
+            if "TIER 1" in tier.upper():
+                import datetime as _dt
+                last_ts = cache.get(key, {}).get("last_searched", "")
+                if last_ts:
+                    hours_since = (_dt.datetime.now() -
+                                   _dt.datetime.fromisoformat(last_ts)
+                                   ).total_seconds() / 3600
+                    if hours_since >= 8:
+                        p2.append(rec)             # stale enough — re-queue
+                        continue
             continue
 
         if "TIER 1" in tier.upper():

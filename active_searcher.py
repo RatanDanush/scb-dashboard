@@ -34,8 +34,14 @@ ACTION_KEYWORDS = {
     "FDI":       ["capital infusion", "equity infusion", "rights issue",
                   "preferential allotment", "qip", "fpo", "fresh capital",
                   "capital raise", "foreign investment", "invests in india",
-                  "sets up plant", "establishes", "greenfield", "expands india",
-                  "new facility", "new plant", "india expansion"],
+                  "sets up plant", "set up plant", "establishes", "greenfield",
+                  "expands india", "new facility", "new plant", "india expansion",
+                  # hub / service centre patterns — covers modern GCC / service hub FDI
+                  "global hub", "service hub", "digital hub", "new hub",
+                  "hub in", "hubs in", "set up hub", "sets up hub",
+                  "global capability centre", "gcc", "global service centre",
+                  "business services hub", "capability hub",
+                  "global delivery centre", "global business services"],
     "IPO":       ["ipo", "initial public offering", "lists on", "stock exchange listing",
                   "files drhp", "sebi approval for listing"],
     "Buyback":   ["buyback", "buy-back", "share repurchase"],
@@ -124,7 +130,23 @@ def _gnews(query: str) -> list:
 
 
 def _search_one_client(rec: dict) -> list:
-    """Run targeted Google News searches for a single client."""
+    """
+    Pull news for a single client from multiple sources:
+
+      Source A — yfinance Ticker.news (if NSE ticker known)
+                 Direct Yahoo Finance news for the stock.
+                 Most reliable for listed Indian subsidiaries — no query guessing.
+
+      Source B — Google News restricted to Indian financial sites
+                 Targets ET / Moneycontrol / BS / Mint specifically.
+                 Catches news that appears on those sites but not in
+                 generic Google News RSS top-20.
+
+      Source C — M&A / deal keyword queries on Google News (fallback,
+                 especially useful for unlisted subsidiaries with no ticker).
+    """
+    import yfinance as yf
+
     sub    = rec.get("indian_subsidiary", "") or ""
     grp    = rec.get("client_group", "") or ""
     ticker = rec.get("ticker")
@@ -135,47 +157,83 @@ def _search_one_client(rec: dict) -> list:
     sub_q = _clean(sub, GEN_STOPS)
     grp_q = _clean(grp, GEN_STOPS + GRP_STOPS)
 
-    queries = []
-    if len(sub_q) > 4:
-        queries.append(f'"{sub_q}" acquisition OR merger OR deal OR investment')
-        queries.append(f'"{sub_q}" stake OR IPO OR JV OR expansion')
-        queries.append(f'"{sub_q}" India 2025 OR 2026')
-        queries.append(f'"{sub_q}" India')          # bare India query — catches any India news
-    if len(grp_q) > 4:
-        queries.append(f'"{grp_q}" India acquisition OR investment OR expansion 2025 OR 2026')
-
     seen    = set()
     actions = []
 
-    for q in queries[:4]:
+    def _add(title, summary, date_str, url, source_label):
+        """Deduplicate and append a normalised action dict."""
+        key = title[:60].lower()
+        if key in seen or not title:
+            return
+        if not _in_window(date_str):
+            return
+        seen.add(key)
+        combined = title + " " + summary
+        atype    = _classify(combined)
+        if atype == "Dividend":
+            return                        # NSE RSS handles dividends
+        actions.append({
+            "company_name":   sub[:60],
+            "ticker":         ticker,
+            "action_type":    atype,
+            "headline":       title[:200],
+            "date":           date_str,
+            "amount":         _amount(combined),
+            "currency":       "INR" if ("₹" in combined or
+                                        "crore" in combined.lower()) else "USD",
+            "source":         source_label,
+            "raw_detail":     summary[:300],
+            "url":            url,
+            "foreign_entity": _foreign(combined),
+            "_pre_matched":   rec,
+        })
+
+    # ── Source A: yfinance ticker news ────────────────────────────────────────
+    if ticker:
+        try:
+            news_items = yf.Ticker(f"{ticker}.NS").news or []
+            for item in news_items[:10]:
+                ts       = item.get("providerPublishTime", 0)
+                date_str = (datetime.date.fromtimestamp(ts).isoformat()
+                            if ts else datetime.date.today().isoformat())
+                content  = (item.get("content") or
+                            item.get("summary") or
+                            item.get("description") or "")
+                _add(item.get("title",""), content, date_str,
+                     item.get("link",""), "Yahoo Finance")
+        except Exception as e:
+            print(f"  yfinance news failed for {ticker}: {e}")
+
+    # ── Source B: Google News restricted to Indian financial sites ─────────────
+    INDIA_SITES = (
+        "site:economictimes.indiatimes.com OR site:moneycontrol.com "
+        "OR site:business-standard.com OR site:livemint.com "
+        "OR site:timesofindia.indiatimes.com OR site:thehindu.com "
+        "OR site:deccanchronicle.com OR site:financialexpress.com"
+    )
+    if len(sub_q) > 4:
+        for item in _gnews(f'"{sub_q}" ({INDIA_SITES})'):
+            _add(item["title"], item["summary"], item["date"], item["url"],
+                 "News — India")
+    if len(grp_q) > 4 and grp_q.lower() != sub_q.lower():
+        for item in _gnews(f'"{grp_q}" India ({INDIA_SITES})'):
+            _add(item["title"], item["summary"], item["date"], item["url"],
+                 "News — India")
+
+    # ── Source C: M&A / deal keyword queries (fallback) ───────────────────────
+    kw_queries = []
+    if len(sub_q) > 4:
+        kw_queries.append(f'"{sub_q}" acquisition OR merger OR deal OR investment')
+        kw_queries.append(f'"{sub_q}" stake OR IPO OR JV OR expansion')
+        kw_queries.append(f'"{sub_q}" India')
+    if len(grp_q) > 4:
+        kw_queries.append(
+            f'"{grp_q}" India acquisition OR investment OR expansion 2025 OR 2026')
+
+    for q in kw_queries[:4]:
         for item in _gnews(q):
-            key = item["title"][:60].lower()
-            if key in seen:
-                continue
-            seen.add(key)
-
-            combined = item["title"] + " " + item["summary"]
-            atype    = _classify(combined)
-
-            # NSE RSS handles dividends — skip them here to avoid duplicates
-            if atype == "Dividend":
-                continue
-
-            actions.append({
-                "company_name":   sub[:60],
-                "ticker":         ticker,
-                "action_type":    atype,
-                "headline":       item["title"][:200],
-                "date":           item["date"],
-                "amount":         _amount(combined),
-                "currency":       "INR" if ("₹" in combined or
-                                            "crore" in combined.lower()) else "USD",
-                "source":         "Google News",
-                "raw_detail":     item["summary"][:300],
-                "url":            item["url"],
-                "foreign_entity": _foreign(combined),
-                "_pre_matched":   rec,
-            })
+            _add(item["title"], item["summary"], item["date"], item["url"],
+                 "Google News")
 
     return actions
 
