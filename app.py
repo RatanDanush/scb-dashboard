@@ -882,9 +882,8 @@ with tab_dive:
                         f'&nbsp;<a href="{link}" target="_blank" '
                         f'style="color:#263238;font-size:11px;">→</a>'
                         f'</div>', unsafe_allow_html=True)
-
-            # ═══════════════════════════════════════════════════════════
-  # TAB 3 — FX SNAPSHOT GENERATOR
-  # ═══════════════════════════════════════════════════════════
-  with tab_snapshot:
-      render_snapshot_tab()
+# ═══════════════════════════════════════════════════════════
+# TAB 3 — FX SNAPSHOT GENERATOR
+# ═══════════════════════════════════════════════════════════
+with tab_snapshot:
+  render_snapshot_tab()
