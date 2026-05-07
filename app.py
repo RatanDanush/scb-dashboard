@@ -24,7 +24,6 @@ from groq_engine import fx_implication, GROQ_API_KEY
 from batch_manager import run_next_batch, get_progress, load_cache
 from deep_dive import run_deep_dive
 from token_tracker import get_status as get_token_status
-from snapshot_page import render_snapshot_tab
 
 # ─── Page config ─────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -512,10 +511,9 @@ st.markdown("""
 with st.spinner("Loading registry..."):
     registry = load_registry()
 
-tab_live, tab_dive, tab_snapshot = st.tabs([
+tab_live, tab_dive = st.tabs([
         "📡  Live Monitor",
-        "🔍  Client Deep Dive",
-        "📊  FX Snapshot"
+        "🔍  Client Deep Dive"
     ])
 
 
@@ -882,8 +880,4 @@ with tab_dive:
                         f'&nbsp;<a href="{link}" target="_blank" '
                         f'style="color:#263238;font-size:11px;">→</a>'
                         f'</div>', unsafe_allow_html=True)
-# ═══════════════════════════════════════════════════════════
-# TAB 3 — FX SNAPSHOT GENERATOR
-# ═══════════════════════════════════════════════════════════
-with tab_snapshot:
-  render_snapshot_tab()
+
