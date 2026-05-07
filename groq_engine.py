@@ -396,10 +396,21 @@ def is_noise(headline: str, client_group: str, subsidiary: str) -> bool:
         return False
 
 
-# ─── 4. Web search ───────────────────────────────────────────────────────────
+# ─── 4. Web search (DEPRECATED — moved to gemini_engine.py) ─────────────────
 
 def web_search_client(rec: dict) -> list:
-    """Groq web search for a specific client. Returns list of event dicts."""
+    """
+    DEPRECATED: Groq tools[{"type": "web_search"}] returns HTTP 400.
+    Groq removed the web_search tool type — only 'function' and 'mcp' are valid.
+    Web search is now handled by gemini_engine.web_search_client().
+    """
+    sub = rec.get("indian_subsidiary", "unknown")
+    print(f"  WARNING: groq_engine.web_search_client is deprecated — "
+          f"use gemini_engine.web_search_client for {sub}")
+    return []
+
+def _web_search_client_original_broken(rec: dict) -> list:
+    """Original Groq web search — kept for reference only. DO NOT CALL."""
     if not GROQ_API_KEY:
         return []
 
@@ -415,8 +426,12 @@ def web_search_client(rec: dict) -> list:
     )
 
     try:
-        from token_tracker import can_afford, record_usage
+        from token_tracker import can_afford, record_usage, client_already_searched
         client_key = f"{grp}|{sub}"
+
+        # Skip if already searched today
+        if client_already_searched(client_key):
+            return []
 
         # Check web search budget
         if not can_afford("web_search", 1200):
@@ -425,11 +440,12 @@ def web_search_client(rec: dict) -> list:
 
         c = _client()
         resp = c.chat.completions.create(
-            model="compound-beta-mini",   # built-in web search; no tools= needed
+            model="llama-3.3-70b-versatile",
             messages=[
                 {"role": "system", "content": WEB_SEARCH_SYSTEM},
                 {"role": "user",   "content": user_msg},
             ],
+            tools=[{"type": "web_search"}],
             temperature=0.1,
             max_tokens=1500,
         )

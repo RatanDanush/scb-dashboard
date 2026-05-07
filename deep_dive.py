@@ -220,8 +220,22 @@ def run_deep_dive(client_group: str, indian_subsidiary: str,
       events:    Groq-extracted significant events
       searched_at: timestamp
     """
-    headlines = _fetch_all_headlines(client_group, indian_subsidiary)
-    events    = _groq_extract(headlines, client_group, indian_subsidiary)
+    # Try Gemini first (grounded search reads full articles — better quality)
+    # Falls back to RSS + Groq if GEMINI_API_KEY not set
+    events = []
+    try:
+        from gemini_engine import deep_dive_search, GEMINI_API_KEY
+        if GEMINI_API_KEY:
+            events = deep_dive_search(client_group, indian_subsidiary)
+            headlines = []   # Gemini searches internally — no separate RSS fetch
+    except Exception as ex:
+        print(f"  Gemini deep dive failed, falling back to Groq: {ex}")
+
+    if not events:
+        headlines = _fetch_all_headlines(client_group, indian_subsidiary)
+        events    = _groq_extract(headlines, client_group, indian_subsidiary)
+    else:
+        headlines = []
 
     # Sort events by date descending, significance first
     sig_order = {"High": 0, "Medium": 1, "Low": 2}

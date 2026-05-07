@@ -87,58 +87,39 @@ def build_priority_queue(registry: dict,
                     M&A/FDI/Strategic/IPO/Buyback this refresh
 
     Priority:
-      P1 — in signal_clients (any tier) — bypasses daily-search limit;
-           re-searched whenever fresh RSS signal fires
-      P2 — Tier 1, not signal, not searched today
-      P3 — Tier 2, not signal, not searched today
-      P4 — Tier 3 / untiered, not searched today (fills remaining budget)
-
-    All tiers sorted by NIH exposure desc within each bucket.
-    Token budget cap in run_next_batch limits total calls per day.
+      P1 — in signal_clients (any tier)
+      P2 — Tier 1, not in signal_clients, not searched today
+      P3 — Tier 2, not in signal_clients, not searched today
+      P4 — everyone else (skipped — RSS only)
     """
     from token_tracker import client_already_searched
 
     all_recs = [r for r in registry["all"]
                 if r.get("indian_subsidiary") and r.get("client_group")]
 
-    p1, p2, p3, p4 = [], [], [], []
+    p1, p2, p3 = [], [], []
 
     for rec in all_recs:
-        key  = _client_key(rec)
+        key = _client_key(rec)
+
+        # Skip if already searched today (token tracker tracks this)
+        if client_already_searched(key):
+            continue
+
         tier = rec.get("priority_tier","") or ""
 
         if key in signal_clients:
-            p1.append(rec)                         # always re-search on fresh signal
-            continue
-
-        # Skip non-signal companies already searched today
-        if client_already_searched(key):
-            # Exception: Tier 1 can be re-searched every 8h
-            # (important clients should never sit on stale data all day)
-            if "TIER 1" in tier.upper():
-                import datetime as _dt
-                last_ts = cache.get(key, {}).get("last_searched", "")
-                if last_ts:
-                    hours_since = (_dt.datetime.now() -
-                                   _dt.datetime.fromisoformat(last_ts)
-                                   ).total_seconds() / 3600
-                    if hours_since >= 8:
-                        p2.append(rec)             # stale enough — re-queue
-                        continue
-            continue
-
-        if "TIER 1" in tier.upper():
+            p1.append(rec)                         # always search
+        elif "TIER 1" in tier.upper():
             p2.append(rec)
         elif "TIER 2" in tier.upper():
             p3.append(rec)
-        else:
-            p4.append(rec)                         # Tier 3 / untiered — fill with budget
 
     # Sort within each priority by NIH exposure desc
-    for lst in [p1, p2, p3, p4]:
+    for lst in [p1, p2, p3]:
         lst.sort(key=lambda r: r.get("net_nih_exposure",0) or 0, reverse=True)
 
-    return p1 + p2 + p3 + p4
+    return p1 + p2 + p3
 
 
 # ─── Main runner ──────────────────────────────────────────────────────────────
@@ -149,10 +130,10 @@ def run_next_batch(registry: dict,
     Called after main feed loads.
     signal_clients: set of client_keys that had trigger-worthy RSS signals.
     """
-    from groq_engine import web_search_client, GROQ_API_KEY
-    from token_tracker import can_afford, get_status
+    from gemini_engine import web_search_client, GEMINI_API_KEY
+    from token_tracker import get_status
 
-    if not GROQ_API_KEY:
+    if not GEMINI_API_KEY:
         return load_cache()
 
     cache = load_cache()
@@ -176,27 +157,20 @@ def run_next_batch(registry: dict,
 
     searched = 0
     for rec in queue:
-        # Check token budget before each call
-        if not can_afford("web_search", 1200):
-            status = get_status()
-            print(f"  Batch: web search budget reached "
-                  f"({status['by_function'].get('web_search',0):,} / "
-                  f"65,000 tokens used). "
-                  f"Remaining clients will use RSS only.")
-            break
-
         sub = rec.get("indian_subsidiary","")
         try:
             events = web_search_client(rec)
             cache  = mark_searched(cache, rec, events)
             print(f"    ✓ {sub[:35]:<35} {len(events)} events")
             searched += 1
-            time.sleep(2)   # rate limit buffer
+            time.sleep(4)   # Gemini free tier: 15 RPM → 4s between calls
         except Exception as ex:
             err = str(ex)
-            if "budget exhausted" in err.lower() or "rate_limit" in err.lower():
-                print(f"  Batch stopped: {err[:80]}")
-                break
+            if "rate limit" in err.lower():
+                # Gemini 15 RPM hit — save progress and continue next cycle
+                print(f"  Batch: Gemini rate limit — pausing. {searched} done this cycle.")
+                save_cache(cache)
+                return cache
             print(f"    ✗ {sub[:35]} — {err[:50]}")
             cache = mark_searched(cache, rec, [])
 
