@@ -24,8 +24,8 @@ DAILY_BUDGET = 100_000
 
 # Per-function allocations
 ALLOCATIONS = {
-    "web_search":    79_000,   # was 65k — briefing 12k + buffer 2k reallocated here
-    "classify":       8_000,
+    "web_search":    65_000,   # Groq compound-beta-mini web search per client
+    "classify":      20_000,   # was 8k — active search now returns ~500-800 items
     "fx_implication": 8_000,
     "deep_dive":      5_000,
 }

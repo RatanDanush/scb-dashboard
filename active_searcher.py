@@ -191,7 +191,10 @@ def _search_one_client(rec: dict) -> list:
     # ── Source A: yfinance ticker news ────────────────────────────────────────
     if ticker:
         try:
-            news_items = yf.Ticker(f"{ticker}.NS").news or []
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            with _TPE(max_workers=1) as _ex:
+                _f = _ex.submit(lambda: yf.Ticker(f"{ticker}.NS").news or [])
+                news_items = _f.result(timeout=3)   # hard 3-second cap
             for item in news_items[:10]:
                 ts       = item.get("providerPublishTime", 0)
                 date_str = (datetime.date.fromtimestamp(ts).isoformat()
@@ -235,7 +238,7 @@ def _search_one_client(rec: dict) -> list:
             _add(item["title"], item["summary"], item["date"], item["url"],
                  "Google News")
 
-    return actions
+    return actions[:8]   # hard cap — keeps classifier token budget sustainable
 
 
 @st.cache_data(ttl=1800)
@@ -243,9 +246,13 @@ def fetch_active_search(tier1_keys: tuple, tier2_keys: tuple,
                         tier3_keys: tuple, _snapshot: tuple) -> list:
     """
     Cached active search for Tier 1 + Tier 2 + top Tier 3 clients.
+    Runs per-client fetches in parallel (ThreadPoolExecutor) so total
+    wall-clock time ≈ slowest single client, not sum of all clients.
     _snapshot is used only as a cache key.
     """
     from client_registry import load_registry
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     try:
         reg = load_registry()
     except Exception:
@@ -256,19 +263,21 @@ def fetch_active_search(tier1_keys: tuple, tier2_keys: tuple,
         for r in reg["all"]
     }
 
+    all_keys = list(tier1_keys) + list(tier2_keys[:50]) + list(tier3_keys)
+    records  = [by_key[k] for k in all_keys if k in by_key]
+
     all_actions = []
-    searched    = 0
-    # Tier 1 + Tier 2 (full); Tier 3 top-40 by NIH
-    all_keys    = list(tier1_keys) + list(tier2_keys[:50]) + list(tier3_keys)
 
-    for key in all_keys:
-        rec = by_key.get(key)
-        if rec:
-            found = _search_one_client(rec)
-            all_actions += found
-            searched += 1
+    # 12-way parallelism — keeps total wall time to ~single-client latency
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futures = {pool.submit(_search_one_client, rec): rec for rec in records}
+        for fut in as_completed(futures, timeout=90):
+            try:
+                all_actions += fut.result(timeout=8)
+            except Exception:
+                pass   # one slow/failed client never blocks the rest
 
-    print(f"  Active search: {searched} clients → {len(all_actions)} M&A/FDI/Strategic items")
+    print(f"  Active search: {len(records)} clients → {len(all_actions)} items")
     return all_actions
 
 
@@ -284,7 +293,9 @@ def get_search_keys(registry: dict):
         for r in registry["all"]
         if "TIER 2" in (r.get("priority_tier",""))
     )
-    # Top 40 Tier 3 / untiered companies by NIH exposure — ensures BASF, etc. get RSS scanned
+    # Top 20 Tier 3 / untiered companies by NIH exposure — ensures high-value
+    # Tier 3 (e.g. BASF when it was miscategorised) get RSS scanned without
+    # flooding the classifier with too many items
     tier3_top = tuple(
         (r.get("client_group",""), r.get("indian_subsidiary",""))
         for r in sorted(
@@ -294,7 +305,7 @@ def get_search_keys(registry: dict):
              and r.get("indian_subsidiary")],
             key=lambda r: r.get("net_nih_exposure", 0) or 0,
             reverse=True
-        )[:40]
+        )[:20]
     )
     snap = tuple(r.get("indian_subsidiary","")[:15] for r in registry["all"][:10])
     return tier1, tier2, tier3_top, snap

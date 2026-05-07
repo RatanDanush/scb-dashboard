@@ -415,12 +415,8 @@ def web_search_client(rec: dict) -> list:
     )
 
     try:
-        from token_tracker import can_afford, record_usage, client_already_searched
+        from token_tracker import can_afford, record_usage
         client_key = f"{grp}|{sub}"
-
-        # Skip if already searched today
-        if client_already_searched(client_key):
-            return []
 
         # Check web search budget
         if not can_afford("web_search", 1200):
@@ -429,12 +425,11 @@ def web_search_client(rec: dict) -> list:
 
         c = _client()
         resp = c.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="compound-beta-mini",   # built-in web search; no tools= needed
             messages=[
                 {"role": "system", "content": WEB_SEARCH_SYSTEM},
                 {"role": "user",   "content": user_msg},
             ],
-            tools=[{"type": "web_search"}],
             temperature=0.1,
             max_tokens=1500,
         )
