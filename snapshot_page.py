@@ -108,14 +108,10 @@ def render_snapshot_tab():
             unsafe_allow_html=True
         )
 
-    # ── Sidebar data notes ─────────────────────────────────────────────────────
-    with st.sidebar:
-        st.markdown("---")
-        st.markdown(
-            '<div style="font-size:10px;font-weight:700;color:#c8a84b;'
-            'letter-spacing:.1em;">FX SNAPSHOT · DATA SOURCES</div>',
-            unsafe_allow_html=True
-        )
+    # ── Data sources note ─────────────────────────────────────────────────────
+    # NOTE: never use `with st.sidebar:` inside a tab block — it corrupts
+    # Streamlit's rendering context and makes all subsequent tab content blank.
+    with st.expander("📋 Data sources", expanded=False):
         st.markdown("""
 | Data | Source |
 |---|---|
