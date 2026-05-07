@@ -7,3 +7,5 @@ python-dotenv
 pandas
 openpyxl
 streamlit-autorefresh
+google-generativeai
+numpy
