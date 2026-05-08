@@ -163,7 +163,7 @@ def run_next_batch(registry: dict,
             cache  = mark_searched(cache, rec, events)
             print(f"    ✓ {sub[:35]:<35} {len(events)} events")
             searched += 1
-            time.sleep(4)   # Gemini free tier: 15 RPM → 4s between calls
+            time.sleep(12)  # Gemini 2.5 Flash free tier: 5 RPM → 12s between calls
         except Exception as ex:
             err = str(ex)
             if "rate limit" in err.lower():
