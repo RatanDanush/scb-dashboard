@@ -196,10 +196,22 @@ def is_secondary_reference(headline: str, client_name: str) -> bool:
 
 def pre_filter(headline: str) -> bool:
     """
-    Fast keyword pre-filter before sending to Groq.
+    Fast keyword pre-filter before sending to classifier.
     Returns True if headline should be KEPT (not filtered).
     Returns False if headline is obvious noise.
+
+    Dividend headlines are always kept — even if packaged with earnings
+    results coverage (e.g. "Q4 results: board declares ₹720 dividend").
     """
+    h = headline.lower()
+    # Always keep dividend / ex-date / buyback headlines regardless of other phrases
+    ALWAYS_KEEP = [
+        "dividend", "ex-date", "ex date", "record date",
+        "repatriat", "buyback", "buy-back", "share repurchase",
+        "open offer", "sebi open offer",
+    ]
+    if any(k in h for k in ALWAYS_KEEP):
+        return True
     return not is_market_commentary(headline)
 
 

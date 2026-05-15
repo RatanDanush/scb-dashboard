@@ -161,7 +161,8 @@ def _search_one_client(rec: dict) -> list:
     actions = []
 
     def _add(title, summary, date_str, url, source_label):
-        """Deduplicate and append a normalised action dict."""
+        """Deduplicate and append a normalised action dict. Skips dividends
+        (NSE RSS is authoritative for those — Source D handles dividend news)."""
         key = title[:60].lower()
         if key in seen or not title:
             return
@@ -171,7 +172,7 @@ def _search_one_client(rec: dict) -> list:
         combined = title + " " + summary
         atype    = _classify(combined)
         if atype == "Dividend":
-            return                        # NSE RSS handles dividends
+            return                        # NSE RSS handles dividends; Source D catches news
         actions.append({
             "company_name":   sub[:60],
             "ticker":         ticker,
@@ -185,6 +186,37 @@ def _search_one_client(rec: dict) -> list:
             "raw_detail":     summary[:300],
             "url":            url,
             "foreign_entity": _foreign(combined),
+            "_pre_matched":   rec,
+        })
+
+    def _add_dividend(title, summary, date_str, url, source_label):
+        """Deduplicate and append dividend items — does NOT skip dividend type."""
+        key = title[:60].lower()
+        if key in seen or not title:
+            return
+        if not _in_window(date_str):
+            return
+        seen.add(key)
+        combined = title + " " + summary
+        atype    = _classify(combined)
+        # Only keep if genuinely dividend-related
+        if atype not in ("Dividend", "Other"):
+            atype = "Dividend"
+        if not any(k in combined.lower() for k in
+                   ["dividend","ex-date","ex date","record date","repatriat","payout"]):
+            return
+        actions.append({
+            "company_name":   sub[:60],
+            "ticker":         ticker,
+            "action_type":    "Dividend",
+            "headline":       title[:200],
+            "date":           date_str,
+            "amount":         _amount(combined),
+            "currency":       "INR",
+            "source":         source_label,
+            "raw_detail":     summary[:300],
+            "url":            url,
+            "foreign_entity": None,
             "_pre_matched":   rec,
         })
 
@@ -238,7 +270,17 @@ def _search_one_client(rec: dict) -> list:
             _add(item["title"], item["summary"], item["date"], item["url"],
                  "Google News")
 
-    return actions[:8]   # hard cap — keeps classifier token budget sustainable
+    # ── Source D: Dividend-specific queries ───────────────────────────────────
+    # Separate from M&A queries — results are kept (not skipped) even if
+    # classified as Dividend. Catches announcements that NSE RSS misses when
+    # the ex-date is >30 days out or the feed was polled before announcement.
+    if len(sub_q) > 4:
+        div_query = f'"{sub_q}" dividend OR "ex-date" OR "record date" 2026'
+        for item in _gnews(div_query):
+            _add_dividend(item["title"], item["summary"],
+                          item["date"], item["url"], "Google News — Dividend")
+
+    return actions[:12]   # hard cap — keeps classifier token budget sustainable
 
 
 @st.cache_data(ttl=1800)

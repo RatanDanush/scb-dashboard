@@ -1,17 +1,20 @@
 """
-batch_manager.py  v2
+batch_manager.py  v3
 --------------------
-Signal-triggered Groq web search with token-aware priority.
+Gemini-powered batch search with two-model routing.
 
-Priority order for Groq web search:
+Priority order:
   P1 — Signal-triggered: RSS/Google News found M&A/FDI/Strategic/IPO/Buyback
-       for this client this refresh → search regardless of tier
+       for this client this refresh → heavy search regardless of tier
   P2 — Tier 1 fill: high-value clients with no RSS signal today
-  P3 — Tier 2 fill: if budget still remains
-  P4 — Everyone else: Google News RSS only
+  P3 — Tier 2 fill: lite search
+  P4 — Everyone else: lite search
 
-Budget cap: 65,000 tokens for web search per day
-Resets midnight UTC (5:30am IST)
+Model routing (respects free-tier RPD limits):
+  Heavy (P1 + top Tier 1, max 20/day) → gemini-2.5-flash  (20 RPD / 5 RPM / 12s sleep)
+  Lite  (P2 remainder + P3 + P4)      → gemini-3.1-flash-lite (500 RPD / 15 RPM / 4s sleep)
+
+Daily capacity: 20 high-quality + 480 lite = true 390-client coverage.
 """
 
 import json, os, datetime, time
@@ -127,10 +130,14 @@ def build_priority_queue(registry: dict,
 def run_next_batch(registry: dict,
                    signal_clients: set = None) -> dict:
     """
-    Called after main feed loads.
-    signal_clients: set of client_keys that had trigger-worthy RSS signals.
+    Runs after main feed loads — non-blocking background intelligence pass.
+
+    Two-model routing:
+      Heavy (≤20 calls/day) → gemini-2.5-flash,      12s sleep
+      Lite  (≤500 calls/day) → gemini-3.1-flash-lite,  4s sleep
     """
-    from gemini_engine import web_search_client, GEMINI_API_KEY
+    from gemini_engine import (web_search_client, web_search_client_lite,
+                               GEMINI_API_KEY)
     from token_tracker import get_status
 
     if not GEMINI_API_KEY:
@@ -151,31 +158,57 @@ def run_next_batch(registry: dict,
         print("  Batch: nothing to search")
         return cache
 
-    print(f"  Batch: {len(queue)} clients queued "
-          f"({len(signal_clients)} signal-triggered)")
+    # ── Route: first 20 → 2.5 Flash (heavy), rest → 3.1 Flash Lite ──────────
+    HEAVY_LIMIT = 20
+    heavy_queue = queue[:HEAVY_LIMIT]
+    lite_queue  = queue[HEAVY_LIMIT:]
+
+    print(f"  Batch: {len(queue)} clients queued — "
+          f"{len(heavy_queue)} heavy (2.5 Flash) / "
+          f"{len(lite_queue)} lite (3.1 Flash Lite) | "
+          f"{len(signal_clients)} signal-triggered")
     cache = mark_batch_run(cache)
 
     searched = 0
-    for rec in queue:
-        sub = rec.get("indian_subsidiary","")
+
+    # ── Heavy pass — Gemini 2.5 Flash, 12s sleep (5 RPM / 20 RPD) ───────────
+    for rec in heavy_queue:
+        sub = rec.get("indian_subsidiary", "")
         try:
             events = web_search_client(rec)
             cache  = mark_searched(cache, rec, events)
-            print(f"    ✓ {sub[:35]:<35} {len(events)} events")
+            print(f"    ✓[2.5F] {sub[:32]:<32} {len(events)} events")
             searched += 1
-            time.sleep(12)  # Gemini 2.5 Flash free tier: 5 RPM → 12s between calls
+            time.sleep(12)
         except Exception as ex:
             err = str(ex)
             if "rate limit" in err.lower():
-                # Gemini 15 RPM hit — save progress and continue next cycle
-                print(f"  Batch: Gemini rate limit — pausing. {searched} done this cycle.")
+                print(f"  Batch: 2.5 Flash rate limit — saving and switching to lite.")
+                save_cache(cache)
+                break
+            print(f"    ✗[2.5F] {sub[:32]} — {err[:50]}")
+            cache = mark_searched(cache, rec, [])
+
+    # ── Lite pass — Gemini 3.1 Flash Lite, 4s sleep (15 RPM / 500 RPD) ──────
+    for rec in lite_queue:
+        sub = rec.get("indian_subsidiary", "")
+        try:
+            events = web_search_client_lite(rec)
+            cache  = mark_searched(cache, rec, events)
+            print(f"    ✓[3.1L] {sub[:32]:<32} {len(events)} events")
+            searched += 1
+            time.sleep(4)
+        except Exception as ex:
+            err = str(ex)
+            if "rate limit" in err.lower():
+                print(f"  Batch: Lite rate limit — pausing. {searched} done this cycle.")
                 save_cache(cache)
                 return cache
-            print(f"    ✗ {sub[:35]} — {err[:50]}")
+            print(f"    ✗[3.1L] {sub[:32]} — {err[:50]}")
             cache = mark_searched(cache, rec, [])
 
     save_cache(cache)
-    print(f"  Batch complete: {searched} clients searched")
+    print(f"  Batch complete: {searched} clients searched this cycle")
     return cache
 
 
@@ -227,7 +260,7 @@ def get_all_cached_events(registry: dict, cache: dict) -> list:
                 "date":           str(ev.get("date",""))[:10],
                 "amount":         ev.get("amount"),
                 "currency":       ev.get("currency","USD"),
-                "source":         "Groq web search",
+                "source":         "Gemini web search",
                 "raw_detail":     ev.get("fx_implication",
                                          ev.get("raw_detail",""))[:300],
                 "url":            ev.get("url","") or "",

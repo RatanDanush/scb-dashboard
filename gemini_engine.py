@@ -1,17 +1,25 @@
 """
 gemini_engine.py
 ----------------
-Gemini 2.0 Flash — replaces the broken Groq web_search tool.
+Gemini-powered intelligence engine — two-model routing strategy.
 
-Why Gemini:
-  - Groq's tools[{"type": "web_search"}] is deprecated (400 error)
-  - Gemini has native Google Search grounding — reads full articles
-  - Free tier: 1,500 RPD / 15 RPM — covers all 390 clients/day
+Models:
+  gemini-2.5-flash-preview-05-20  →  5 RPM / 20 RPD (free tier)
+    Used for: P1/P2 batch web search (signal-triggered + top Tier 1)
+              Deep dive (on-demand grounded search)
+              Daily briefing synthesis
+
+  gemini-3.1-flash-lite           →  15 RPM / 500 RPD (free tier)
+    Used for: P3/P4 batch web search (all remaining clients)
+              Classification + noise filter (replaces Groq batch_classify)
+              Dividend-specific queries
 
 Functions:
-  1. web_search_client()  — per-client grounded web search (replaces Groq batch)
-  2. daily_briefing()     — FX desk summary (better synthesis than Groq 70b)
-  3. deep_dive_search()   — 12-month grounded history (replaces deep_dive RSS + Groq)
+  1. web_search_client()       — 2.5 Flash grounded search (P1/P2, top 20/day)
+  2. web_search_client_lite()  — 3.1 Flash Lite grounded search (P3/P4, 500/day)
+  3. gemini_classify()         — 3.1 Flash Lite batch classifier (drop-in for batch_classify)
+  4. daily_briefing()          — 2.5 Flash FX desk summary
+  5. deep_dive_search()        — 2.5 Flash 12-month grounded history
 """
 
 import os, re, json, requests
@@ -19,9 +27,10 @@ import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL   = "gemini-2.5-flash-preview-05-20"
-_BASE_URL      = "https://generativelanguage.googleapis.com/v1beta/models"
+GEMINI_API_KEY   = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL     = "gemini-2.5-flash-preview-05-20"   # 5 RPM / 20 RPD  — high quality
+GEMINI_MODEL_LITE = "gemini-3.1-flash-lite"            # 15 RPM / 500 RPD — high throughput
+_BASE_URL        = "https://generativelanguage.googleapis.com/v1beta/models"
 
 
 # ─── System prompts ──────────────────────────────────────────────────────────
@@ -103,17 +112,61 @@ Return JSON array (max 15 items):
 Return ONLY valid JSON array. No other text."""
 
 
+# ─── Classifier prompt (for gemini_classify) ─────────────────────────────────
+
+CLASSIFIER_SYSTEM = """You are a financial news classifier for Standard Chartered Bank India FX desk.
+Classify headlines and apply strict INR relevance filters.
+
+For each headline return a JSON object:
+{
+  "action_type": "M&A"|"FDI"|"Dividend"|"Buyback"|"Strategic"|"IPO"|"Delisting"|"Restructuring"|"Other",
+  "confidence": "high"|"medium"|"low",
+  "inr_involved": true|false,
+  "skip_india_india": true|false,
+  "is_indian_subsidiary_dividend": true|false,
+  "is_primary_subject": true|false,
+  "sebi_open_offer_trigger": true|false,
+  "foreign_entity": "counterparty name or null",
+  "deal_value_usd_m": number|null,
+  "is_significant": true|false,
+  "event_date": "YYYY-MM-DD or null"
+}
+
+inr_involved = true ONLY IF cross-border INR flow exists:
+  ✅ Foreign MNC investing in Indian company
+  ✅ Indian subsidiary paying dividends to foreign parent
+  ✅ Foreign entity acquiring Indian company
+  ✅ ECB / foreign parent capital infusion into Indian subsidiary
+  ✅ Upstream foreign merger triggering SEBI open offer for listed Indian sub
+  ❌ Foreign parent acquires another foreign company — even if has Indian sub
+  ❌ Investment in non-India geography (Ohio, Alabama, China, EU, UAE etc)
+  ❌ India-India domestic deal with no foreign funding
+  ❌ Analyst ratings, price targets, share price moves
+  ❌ Aggregator / list articles (Tracxn, Crunchbase, "List of N acquisitions")
+
+is_indian_subsidiary_dividend = true ONLY if dividend declared BY Indian listed company.
+skip_india_india = true if both acquirer AND target are Indian with no foreign element.
+is_primary_subject = false if the matched client is only a secondary mention.
+is_significant = false for: share price, analyst ratings, market commentary, stock picks.
+
+Return ONLY a valid JSON array, one object per headline. No other text."""
+
+
 # ─── Core REST API call ───────────────────────────────────────────────────────
 
 def _call(system: str, user: str,
           use_search: bool = True,
-          max_tokens: int  = 2000) -> str:
+          max_tokens: int  = 2000,
+          model: str       = None) -> str:
     """
     Single Gemini API call via REST.
+    model defaults to GEMINI_MODEL (2.5 Flash); pass GEMINI_MODEL_LITE for throughput.
     use_search=True enables Google Search grounding — reads full web articles.
     """
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY not set — add to Streamlit secrets")
+
+    _model = model or GEMINI_MODEL
 
     payload = {
         "system_instruction": {"parts": [{"text": system}]},
@@ -127,12 +180,12 @@ def _call(system: str, user: str,
     if use_search:
         payload["tools"] = [{"google_search": {}}]
 
-    url  = f"{_BASE_URL}/{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    url  = f"{_BASE_URL}/{_model}:generateContent?key={GEMINI_API_KEY}"
     resp = requests.post(url, json=payload, timeout=45)
 
     if resp.status_code == 429:
         raise ValueError(
-            "Gemini rate limit hit (15 RPM). "
+            f"Gemini rate limit hit ({_model}). "
             "Batch will continue on next cycle."
         )
 
@@ -144,7 +197,6 @@ def _call(system: str, user: str,
     text  = "".join(p.get("text", "") for p in parts).strip()
 
     if not text:
-        # Check for safety block or empty grounding result
         finish = (data.get("candidates", [{}])[0]
                       .get("finishReason", "UNKNOWN"))
         raise ValueError(f"Gemini returned empty response (finishReason: {finish})")
@@ -265,7 +317,160 @@ def web_search_client(rec: dict) -> list:
         return []
 
 
-# ─── 2. Daily briefing ────────────────────────────────────────────────────────
+# ─── 1b. Lite web search (Gemini 3.1 Flash Lite — P3/P4 clients) ─────────────
+
+def web_search_client_lite(rec: dict) -> list:
+    """
+    Gemini 3.1 Flash Lite grounded web search — P3/P4 batch queue.
+
+    Quota: 500 RPD / 15 RPM — covers all remaining clients after the heavy pass.
+    Quality is slightly lower than 2.5 Flash but sufficient for coverage search.
+    Same output schema as web_search_client — drop-in for batch_manager.
+    """
+    if not GEMINI_API_KEY:
+        return []
+
+    sub    = rec.get("indian_subsidiary", "") or ""
+    grp    = rec.get("client_group",       "") or ""
+    exp    = rec.get("net_nih_exposure",   0)  or 0
+    sector = rec.get("sector",             "") or ""
+
+    user_msg = (
+        f"Company: {sub}\n"
+        f"MNC Parent: {grp}\n"
+        f"Sector: {sector}\n"
+        f"NIH Exposure: ${exp:,.0f}M\n\n"
+        f"Search for corporate actions involving {sub} or {grp} in India "
+        f"in the last 12 months. Focus on cross-border INR FX flows only. "
+        f"Include dividends declared by the Indian subsidiary. "
+        f"Return as JSON array."
+    )
+
+    try:
+        from token_tracker import client_already_searched, record_usage
+
+        client_key = f"{grp}|{sub}"
+        if client_already_searched(client_key):
+            return []
+
+        raw = _call(WEB_SEARCH_SYSTEM, user_msg,
+                    use_search=True,
+                    max_tokens=1500,
+                    model=GEMINI_MODEL_LITE)
+        if not raw.strip():
+            return []
+
+        events = _parse_json(raw)
+        if not isinstance(events, list):
+            return []
+
+        record_usage("web_search", 800, client_key)   # nominal — Lite uses fewer tokens
+
+        results = []
+        for ev in events:
+            if not ev.get("inr_involved", True):
+                continue
+            results.append({
+                "company_name":   sub[:60],
+                "ticker":         rec.get("ticker"),
+                "action_type":    ev.get("action_type", "Other"),
+                "headline":       ev.get("headline", "")[:200],
+                "date":           str(ev.get("event_date") or ev.get("date", ""))[:10],
+                "amount":         _parse_amount(str(ev.get("deal_value", "") or "")),
+                "currency":       "USD",
+                "source":         "Gemini web search",
+                "raw_detail":     ev.get("fx_implication", "")[:300],
+                "url":            ev.get("source_url",    "") or "",
+                "foreign_entity": ev.get("counterparty"),
+                "_significance":  ev.get("significance", "Medium"),
+                "_inr_involved":  True,
+                "_pre_matched":   rec,
+            })
+        return results
+
+    except Exception as ex:
+        print(f"  Gemini Lite web search error {sub[:30]}: {ex}")
+        return []
+
+
+# ─── 1c. Batch classifier (Gemini 3.1 Flash Lite — replaces Groq batch_classify) ──
+
+def gemini_classify(headlines_tuple: tuple) -> list:
+    """
+    Classify headlines using Gemini 3.1 Flash Lite.
+    Drop-in replacement for groq_engine.batch_classify.
+
+    Input:  tuple of (headline_str, context_str) pairs
+    Output: list of classification dicts in same order
+
+    Uses GEMINI_MODEL_LITE (500 RPD / 15 RPM) — no Groq token budget consumed.
+    No Google Search grounding needed — pure classification task.
+    """
+    if not GEMINI_API_KEY or not headlines_tuple:
+        return [_classify_fallback(h) for h, _ in headlines_tuple]
+
+    headlines = list(headlines_tuple)
+    results   = []
+    chunk_size = 8    # Lite model handles larger batches accurately
+
+    for i in range(0, len(headlines), chunk_size):
+        chunk    = headlines[i:i + chunk_size]
+        numbered = "\n".join(
+            f"{j+1}. HEADLINE: {h}\n   CONTEXT: {s[:120]}"
+            for j, (h, s) in enumerate(chunk)
+        )
+        user_msg = (
+            f"Classify these {len(chunk)} headlines.\n"
+            f"Return a JSON array of exactly {len(chunk)} objects in order:\n\n"
+            f"{numbered}"
+        )
+        try:
+            raw  = _call(CLASSIFIER_SYSTEM, user_msg,
+                         use_search=False,
+                         max_tokens=1000,
+                         model=GEMINI_MODEL_LITE)
+            data = _parse_json(raw)
+            if isinstance(data, list) and len(data) == len(chunk):
+                results.extend(data)
+            else:
+                results.extend([_classify_fallback(h) for h, _ in chunk])
+        except Exception as ex:
+            print(f"  Gemini classify error chunk {i}: {ex}")
+            results.extend([_classify_fallback(h) for h, _ in chunk])
+
+    return results
+
+
+def _classify_fallback(headline: str) -> dict:
+    """Keyword fallback when Gemini unavailable."""
+    h = headline.lower()
+    if any(k in h for k in ["acqui","merger","takeover","stake","open offer"]):
+        atype = "M&A"
+    elif any(k in h for k in ["dividend","ex-date","record date","repatriat"]):
+        atype = "Dividend"
+    elif any(k in h for k in ["invest","fdi","capital","raise","infusion","greenfield"]):
+        atype = "FDI"
+    elif any(k in h for k in ["ipo","listing","drhp","delist"]):
+        atype = "IPO"
+    elif any(k in h for k in ["buyback","buy-back","repurchase"]):
+        atype = "Buyback"
+    elif any(k in h for k in ["jv","joint venture","mou","partnership"]):
+        atype = "Strategic"
+    else:
+        atype = "Other"
+    return {
+        "action_type":                   atype,
+        "confidence":                    "medium",
+        "inr_involved":                  True,
+        "skip_india_india":              False,
+        "is_indian_subsidiary_dividend": atype == "Dividend",
+        "is_primary_subject":            True,
+        "sebi_open_offer_trigger":       False,
+        "foreign_entity":                None,
+        "deal_value_usd_m":              None,
+        "is_significant":                atype != "Other",
+        "event_date":                    None,
+    }
 
 @st.cache_data(ttl=1800)
 def daily_briefing(action_snapshot: tuple) -> str:
